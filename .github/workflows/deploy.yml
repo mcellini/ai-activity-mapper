@@ -26,8 +26,10 @@ jobs:
       - run: npm ci
       - run: npm run build
         env:
-          # URL dell'app web di Apps Script, salvato in Settings > Secrets and variables > Actions > Variables
+          # Settings > Secrets and variables > Actions > Variables
+          # VITE_SHEETS_URL è l'URL /exec. VITE_GOOGLE_CLIENT_ID è il client ID OAuth pubblico, non un segreto.
           VITE_SHEETS_URL: ${{ vars.VITE_SHEETS_URL }}
+          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
