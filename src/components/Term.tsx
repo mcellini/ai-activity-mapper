@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 export const GLOSSARY: Record<string, { label: string; def: string }> = {
   baseline: {
@@ -39,13 +39,49 @@ export const GLOSSARY: Record<string, { label: string; def: string }> = {
   },
 };
 
-/** Termine con definizione al passaggio del mouse o al focus */
+/** Definizione apribile con il tocco, il click o il mouse. Il passaggio del mouse vale solo dove esiste. */
 export function Term({ k, children }: { k: keyof typeof GLOSSARY; children?: ReactNode }) {
   const g = GLOSSARY[k];
+  const tipId = useId();
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const [pinned, setPinned] = useState(false);
+
+  useEffect(() => {
+    if (!pinned) return;
+    const onPointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setPinned(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPinned(false);
+    };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [pinned]);
+
   return (
-    <span className="group relative inline-block cursor-help outline-none" tabIndex={0}>
-      <span className="border-b border-dotted border-slate-400">{children ?? g.label}</span>
-      <span className="pointer-events-none absolute left-0 top-full z-30 mt-1 hidden w-64 rounded-lg border border-slate-200 bg-white p-2 text-left text-xs font-normal normal-case leading-snug tracking-normal text-slate-700 shadow-lg group-hover:block group-focus:block">
+    <span ref={rootRef} className="group relative inline-block">
+      <button
+        type="button"
+        className="cursor-help border-b border-dotted border-slate-400 text-inherit"
+        aria-expanded={pinned}
+        aria-controls={tipId}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setPinned((open) => !open);
+        }}
+      >
+        {children ?? g.label}
+      </button>
+      <span
+        id={tipId}
+        role="note"
+        className={`absolute left-0 top-full z-30 mt-1 w-64 rounded-lg border border-slate-200 bg-white p-2 text-left text-xs font-normal normal-case leading-snug tracking-normal text-slate-700 shadow-lg ${pinned ? "block" : "hidden"} [@media(hover:hover)]:group-hover:block`}
+      >
         <span className="mb-0.5 block font-semibold text-slate-900">{g.label}</span>
         {g.def}
       </span>

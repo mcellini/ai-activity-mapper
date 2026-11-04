@@ -1,26 +1,47 @@
-import type { AppState, Snapshot } from "@/types";
-import { SEED } from "@/data/seed";
+import type { AppState, ServerSnapshot, Snapshot } from "@/types";
+import { emptyState, SEED } from "@/data/seed";
 import { migrate } from "@/lib/migrate";
 import { areaLabel, confLabel, destLabel, frequencyLabel, workTypeLabel } from "@/lib/calc";
+import { validateState } from "@/lib/validate";
 
 const STATE_KEY = "aam.state.v5";
 const OLD_STATE_KEYS = ["aam.state.v4", "aam.state.v3", "aam.state.v2"];
 const URL_KEY = "aam.sheetsUrl";
+const URL_OFF_KEY = "aam.sheetsUrl.off";
 const SNAP_KEY = "aam.snapshots.v1";
+
+export interface SheetsResponse {
+  ok: boolean;
+  error?: string;
+  empty?: boolean;
+  conflict?: boolean;
+  conflicts?: string[];
+  revision?: number;
+  state?: unknown;
+  merged?: boolean;
+  snapshots?: ServerSnapshot[];
+  snapshot?: ServerSnapshot;
+}
+
+/** Migra e rifiuta gli oggetti che non hanno la forma attesa. */
+export function acceptState(raw: unknown): AppState | null {
+  const migrated = migrate(raw);
+  if (!migrated) return null;
+  return validateState(migrated).length === 0 ? migrated : null;
+}
 
 export function loadLocal(): AppState {
   try {
     for (const key of [STATE_KEY, ...OLD_STATE_KEYS]) {
       const raw = localStorage.getItem(key);
-      if (raw) {
-        const state = migrate(JSON.parse(raw));
-        if (state) return state;
-      }
+      if (!raw) continue;
+      const state = acceptState(JSON.parse(raw));
+      if (state) return state;
     }
   } catch {
     /* storage non disponibile */
   }
-  return SEED;
+  return structuredClone(SEED);
 }
 
 export function saveLocal(state: AppState) {
@@ -36,7 +57,7 @@ export function loadSnapshots(): Snapshot[] {
     const raw = localStorage.getItem(SNAP_KEY);
     if (!raw) return [];
     return (JSON.parse(raw) as Snapshot[])
-      .map((s) => ({ ...s, state: migrate(s.state) as AppState }))
+      .map((s) => ({ ...s, state: acceptState(s.state) as AppState }))
       .filter((s) => s.state);
   } catch {
     return [];
@@ -52,8 +73,9 @@ export function saveSnapshots(list: Snapshot[]) {
 }
 
 export function loadSheetsUrl(): string {
-  const envUrl = (import.meta.env.VITE_SHEETS_URL as string | undefined) ?? "";
+  const envUrl = (import.meta.env.VITE_SHEETS_URL as string | undefined)?.trim() ?? "";
   try {
+    if (localStorage.getItem(URL_OFF_KEY) === "1") return "";
     return localStorage.getItem(URL_KEY) ?? envUrl;
   } catch {
     return envUrl;
@@ -62,35 +84,69 @@ export function loadSheetsUrl(): string {
 
 export function saveSheetsUrl(url: string) {
   try {
-    localStorage.setItem(URL_KEY, url);
+    if (url) {
+      localStorage.setItem(URL_KEY, url);
+      localStorage.removeItem(URL_OFF_KEY);
+    } else {
+      localStorage.removeItem(URL_KEY);
+      localStorage.setItem(URL_OFF_KEY, "1");
+    }
   } catch {
     /* ignore */
   }
 }
 
-/** Legge lo stato dal foglio (Apps Script doGet). Accetta anche dati di versioni precedenti. */
-export async function pullFromSheets(url: string): Promise<AppState | null> {
-  const res = await fetch(url, { redirect: "follow" });
+/**
+ * Tutte le chiamate sono POST con Content-Type text/plain: niente preflight CORS,
+ * e il token resta nel corpo, non nell'URL.
+ */
+export async function sheetsCall(url: string, body: Record<string, unknown>): Promise<SheetsResponse> {
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(body),
+      redirect: "follow",
+    });
+  } catch {
+    throw new Error("Rete non disponibile");
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return migrate(data?.state);
+  try {
+    return await res.json() as SheetsResponse;
+  } catch {
+    throw new Error("Risposta non valida dall'app web");
+  }
 }
 
-/**
- * Scrive lo stato sul foglio. Content-Type text/plain evita il preflight CORS,
- * che Apps Script non gestisce.
- */
-export async function pushToSheets(url: string, state: AppState): Promise<void> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(state),
-    redirect: "follow",
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json().catch(() => ({ ok: true }));
-  if (data?.ok === false) throw new Error(data.error ?? "Errore Apps Script");
+export function pullFromSheets(url: string, token: string) {
+  return sheetsCall(url, { action: "pull", token });
 }
+
+export function pushToSheets(
+  url: string,
+  token: string,
+  payload: { expectedRevision: number; baseState: AppState | null; state: AppState; force?: boolean },
+) {
+  return sheetsCall(url, { action: "push", token, ...payload });
+}
+
+export function snapshotOnSheets(url: string, token: string, label: string) {
+  return sheetsCall(url, { action: "snapshot", token, label });
+}
+
+export function listServerSnapshots(url: string, token: string) {
+  return sheetsCall(url, { action: "listSnapshots", token });
+}
+
+export function restoreServerSnapshot(
+  url: string, token: string, fileId: string, expectedRevision: number, force = false,
+) {
+  return sheetsCall(url, { action: "restore", token, fileId, expectedRevision, force });
+}
+
+export { emptyState };
 
 export function exportJson(state: AppState) {
   download("ai-activity-mapper.json", JSON.stringify(state, null, 2), "application/json");

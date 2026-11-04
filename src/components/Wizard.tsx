@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Activity, Area, Complexity, Destination, RiskLevel, TeamId, WorkType } from "@/types";
+import Dialog from "./Dialog";
 import {
   AREAS, COMPLEXITY_LABEL, DESTINATIONS, FREQUENCIES, RISK_LABEL, TEAMS, WORK_DEFAULTS, WORK_TYPES, fmt, uid,
 } from "@/lib/calc";
@@ -57,11 +58,9 @@ export default function Wizard({ defaultTeam, onCreate, onClose }: Props) {
     });
 
   return (
-    <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
-      <div className="card max-h-[90vh] w-full max-w-lg space-y-4 overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+    <Dialog title="Nuova attività" onClose={onClose}>
         <div>
-          <h2 className="text-lg font-semibold">Nuova attività</h2>
-          <div className="mt-2 flex gap-1">
+          <div className="mt-2 flex gap-1" aria-hidden="true">
             {STEPS.map((s, i) => (
               <div key={s} className={`h-1.5 flex-1 rounded-full ${i <= step ? "bg-indigo-600" : "bg-slate-200"}`} />
             ))}
@@ -72,7 +71,7 @@ export default function Wizard({ defaultTeam, onCreate, onClose }: Props) {
         {step === 0 && (
           <div className="space-y-3">
             <label className="block"><span className="label">Nome dell'attività</span>
-              <input id="wz-name" className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Es. Report mensile di performance" />
+              <input id="wz-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Es. Report mensile di performance" />
             </label>
             <label className="block"><span className="label">Team</span>
               <select id="wz-team" className="input" value={teamId} onChange={(e) => setTeamId(e.target.value as TeamId)}>
@@ -172,14 +171,13 @@ export default function Wizard({ defaultTeam, onCreate, onClose }: Props) {
         )}
 
         <div className="flex justify-between">
-          <button className="btn" onClick={step === 0 ? onClose : () => setStep(step - 1)}>{step === 0 ? "Annulla" : "Indietro"}</button>
+          <button type="button" className="btn" onClick={step === 0 ? onClose : () => setStep(step - 1)}>{step === 0 ? "Annulla" : "Indietro"}</button>
           {step < STEPS.length - 1 ? (
-            <button className="btn-primary" onClick={() => setStep(step + 1)}>Avanti</button>
+            <button type="button" className="btn-primary" onClick={() => setStep(step + 1)}>Avanti</button>
           ) : (
-            <button className="btn-primary" onClick={create}>Crea attività</button>
+            <button type="button" className="btn-primary" onClick={create}>Crea attività</button>
           )}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

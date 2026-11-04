@@ -177,6 +177,8 @@ export interface Workflow {
 
 export interface AppState {
   version: 5;
+  /** true finché è in uso il dataset di esempio, non i dati del team */
+  example?: boolean;
   activities: Activity[];
   workflows: Workflow[];
   blockers: Blocker[];
@@ -196,4 +198,13 @@ export interface Snapshot {
   state: AppState;
 }
 
-export type SyncStatus = "off" | "idle" | "saving" | "saved" | "error";
+export type SyncStatus = "off" | "auth" | "loading" | "idle" | "saving" | "saved" | "error";
+
+/** Istante salvato sul Drive dello script, non nel browser */
+export interface ServerSnapshot {
+  id: string;
+  label: string;
+  savedAt: string;
+  email: string;
+  revision: number;
+}

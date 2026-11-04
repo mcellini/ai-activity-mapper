@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { Activity } from "@/types";
 import { parseCsv, rowsToActivities, type CsvResult } from "@/lib/csv";
 import { fmt, teamById } from "@/lib/calc";
+import Dialog from "./Dialog";
 
 interface Props {
   existing: number;
@@ -26,17 +27,15 @@ export default function ImportCsvModal({ existing, onImport, onClose }: Props) {
   const ok = res && res.activities.length > 0;
 
   return (
-    <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
-      <div className="card max-h-[90vh] w-full max-w-2xl space-y-4 overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+    <Dialog title="Importa attività da CSV" onClose={onClose} wide>
         <div>
-          <h2 className="text-lg font-semibold">Importa attività da CSV</h2>
           <p className="text-sm text-slate-500">
             Salva il foglio Excel come CSV. Servono le colonne Team, Attività e Ore manuali (o Ore/mese). Facoltative: Area (delivery, gare, R&D), Esecuzioni/mese, Tipo lavoro, Ore con AI, Ore liberate, Ore potenziate, Automatizzabile, Aumentabile, Complessità, Tool, Note.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
-          <button className="btn-primary" onClick={() => ref.current?.click()}>Scegli file CSV</button>
+          <button type="button" className="btn-primary" onClick={() => ref.current?.click()}>Scegli file CSV</button>
           <span className="text-sm text-slate-500">{fileName || "Nessun file scelto"}</span>
           <input ref={ref} type="file" accept=".csv,text/csv" hidden onChange={(e) => load(e.target.files?.[0])} />
         </div>
@@ -89,9 +88,10 @@ export default function ImportCsvModal({ existing, onImport, onClose }: Props) {
         )}
 
         <div className="flex justify-end gap-2">
-          <button className="btn" onClick={onClose}>Chiudi</button>
+          <button type="button" className="btn" onClick={onClose}>Chiudi</button>
           {ok && (
             <button
+              type="button"
               className={mode === "replace" && !armed ? "btn !border-rose-300 !text-rose-700" : "btn-primary"}
               onClick={() => {
                 if (mode === "replace" && !armed) { setArmed(true); return; }
@@ -102,7 +102,6 @@ export default function ImportCsvModal({ existing, onImport, onClose }: Props) {
             </button>
           )}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

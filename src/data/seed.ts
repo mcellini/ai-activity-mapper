@@ -75,6 +75,7 @@ const people: Person[] = [
 
 export const SEED: AppState = {
   version: 5,
+  example: true,
   updatedAt: new Date(0).toISOString(),
   activities,
   blockers: [
@@ -117,3 +118,28 @@ export const SEED: AppState = {
     },
   ],
 };
+
+/** Copia del dataset di esempio, con un updatedAt nuovo. Non muta SEED. */
+export function sampleState(): AppState {
+  const copy = structuredClone(SEED);
+  copy.example = true;
+  copy.updatedAt = new Date().toISOString();
+  return copy;
+}
+
+/** Stato vuoto, da usare quando il foglio non ha ancora dati. */
+export function emptyState(): AppState {
+  return {
+    version: 5,
+    example: false,
+    updatedAt: new Date().toISOString(),
+    activities: [],
+    workflows: [],
+    blockers: [],
+    microTools: [],
+    people: [],
+    clients: [],
+    actuals: {},
+    settings: { hourlyCost: 40, worstThreshold: 80 },
+  };
+}

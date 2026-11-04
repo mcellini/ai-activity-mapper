@@ -1,12 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { Activity, AppState, Snapshot, SyncStatus } from "@/types";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import type { Activity, AppState, ServerSnapshot, Snapshot, SyncStatus } from "@/types";
 import { fmt, uid } from "@/lib/calc";
 import { metrics } from "@/lib/metrics";
+import { contentKey } from "@/lib/merge";
 import { migrate } from "@/lib/migrate";
+import { validateState } from "@/lib/validate";
+import { emptyState, sampleState } from "@/data/seed";
 import {
-  exportCsv, exportJson, loadLocal, loadSheetsUrl, loadSnapshots, pullFromSheets,
-  pushToSheets, saveLocal, saveSheetsUrl, saveSnapshots,
+  acceptState, exportCsv, exportJson, listServerSnapshots, loadLocal, loadSheetsUrl, loadSnapshots,
+  pullFromSheets, pushToSheets, restoreServerSnapshot, saveLocal, saveSheetsUrl, saveSnapshots, snapshotOnSheets,
 } from "@/lib/storage";
+import {
+  loadSession, signOutGoogle, storeSession, tokenUsable, type GoogleSession,
+} from "@/lib/googleAuth";
 import ExecutiveView from "./ExecutiveView";
 import SummaryView from "./SummaryView";
 import TeamsView from "./TeamsView";
@@ -23,6 +29,8 @@ import TableView from "./TableView";
 import ToBeView from "./ToBeView";
 import AgentsView from "./AgentsView";
 import ImportCsvModal from "./ImportCsvModal";
+import GoogleSignInButton from "./GoogleSignInButton";
+import ConfirmButton from "./ConfirmButton";
 import { runChecks } from "@/lib/quality";
 
 const TABS = [
@@ -33,83 +41,172 @@ type Tab = (typeof TABS)[number];
 
 const STATUS_LABEL: Record<SyncStatus, string> = {
   off: "Solo locale",
+  auth: "Accesso richiesto",
+  loading: "Caricamento…",
   idle: "Sheets collegato",
   saving: "Salvataggio…",
   saved: "Salvato su Sheets",
   error: "Errore sync",
 };
 
+const tabDomId = (tab: string) => `vista-${tab.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+const clone = <T,>(value: T): T => structuredClone(value);
+
 export default function AIActivityMapper() {
+  const initialUrl = loadSheetsUrl();
   const [state, setState] = useState<AppState>(loadLocal);
   const [snapshots, setSnapshots] = useState<Snapshot[]>(loadSnapshots);
+  const [serverSnaps, setServerSnaps] = useState<ServerSnapshot[]>([]);
   const [tab, setTab] = useState<Tab>("Executive");
-  const [sheetsUrl, setSheetsUrl] = useState(loadSheetsUrl);
-  const [status, setStatus] = useState<SyncStatus>(sheetsUrl ? "idle" : "off");
+  const [sheetsUrl, setSheetsUrl] = useState(initialUrl);
+  const [session, setSession] = useState<GoogleSession | null>(loadSession);
+  const [status, setStatus] = useState<SyncStatus>(initialUrl ? "auth" : "off");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [showSync, setShowSync] = useState(false);
   const [showCsv, setShowCsv] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const firstRun = useRef(true);
-
-  const commit = (patch: Partial<AppState>) =>
-    setState((s) => ({ ...s, ...patch, updatedAt: new Date().toISOString() }));
-
-  /** updatedAt dello stato sul foglio all'ultimo allineamento: serve a capire se un collega ha salvato prima di noi */
-  const base = useRef<string | null>(null);
-  const [synced, setSynced] = useState(false);
   const [conflict, setConflict] = useState<AppState | null>(null);
+  const [conflictNames, setConflictNames] = useState<string[]>([]);
+  const [syncReady, setSyncReady] = useState(!initialUrl);
+  const [revealed, setRevealed] = useState(!initialUrl);
+  const [remoteRevision, setRemoteRevision] = useState(0);
+  const [pullNonce, setPullNonce] = useState(0);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const stateRef = useRef(state);
+  const snapsRef = useRef(snapshots);
+  const revealedRef = useRef(revealed);
+  const sessionRef = useRef(session);
+  const baseRevision = useRef(0);
+  const baseState = useRef<AppState | null>(initialUrl ? null : clone(loadLocal()));
+  const conflictRev = useRef(0);
+  const editGen = useRef(0);
+  stateRef.current = state;
+  snapsRef.current = snapshots;
+  revealedRef.current = revealed;
+  sessionRef.current = session;
 
-  const adopt = (remote: AppState) => {
-    firstRun.current = true; // evita di rispedire subito ciò che abbiamo appena letto
-    base.current = remote.updatedAt;
-    setConflict(null);
-    setState(remote);
-    setStatus("idle");
-    setError("");
+  const remember = (label: string) => {
+    const snap: Snapshot = { id: uid(), label, date: new Date().toISOString(), state: clone(stateRef.current) };
+    const next = [snap, ...snapsRef.current].slice(0, 20);
+    snapsRef.current = next;
+    setSnapshots(next);
+    saveSnapshots(next);
   };
 
-  // all'apertura con Sheets collegato: prima si legge il foglio, solo dopo si può scrivere
+  const applyRemote = (next: AppState, revision: number, snapshotLabel: string | null) => {
+    if (snapshotLabel && revealedRef.current && contentKey(stateRef.current) !== contentKey(next)) remember(snapshotLabel);
+    baseRevision.current = revision;
+    baseState.current = clone(next);
+    setRemoteRevision(revision);
+    setConflict(null);
+    setConflictNames([]);
+    setState(next);
+    setSyncReady(true);
+    setRevealed(true);
+  };
+
+  const onCredential = useCallback((next: GoogleSession) => {
+    storeSession(next);
+    setSession(next);
+    setError("");
+  }, []);
+
+  const signOut = () => {
+    signOutGoogle();
+    setSession(null);
+    if (sheetsUrl) {
+      setSyncReady(false);
+      setStatus("auth");
+    }
+  };
+
+  useEffect(() => { saveLocal(state); }, [state]);
+
   useEffect(() => {
-    if (!sheetsUrl) { setSynced(false); return; }
+    if (!sheetsUrl) {
+      setStatus("off");
+      setSyncReady(true);
+      setRevealed(true);
+      setError("");
+      if (!baseState.current) baseState.current = clone(stateRef.current);
+      return;
+    }
+    if (!tokenUsable(session)) {
+      setStatus("auth");
+      setSyncReady(false);
+      return;
+    }
     let cancelled = false;
+    setStatus("loading");
+    setSyncReady(false);
     (async () => {
       try {
-        const remote = await pullFromSheets(sheetsUrl);
+        const res = await pullFromSheets(sheetsUrl, session.token);
         if (cancelled) return;
-        if (remote) adopt(remote);
-        else base.current = ""; // foglio vuoto: il primo salvataggio parte dai dati locali
-        setSynced(true);
+        if (!res.ok) throw new Error(res.error || "Errore");
+        if (res.empty) applyRemote(emptyState(), 0, "Prima del collegamento al foglio vuoto");
+        else {
+          const accepted = acceptState(res.state);
+          if (!accepted) throw new Error("Il foglio contiene dati non validi");
+          applyRemote(accepted, res.revision ?? 0, "Prima del caricamento dal foglio");
+        }
+        setStatus("idle");
+        setError("");
       } catch (e) {
         if (cancelled) return;
         setStatus("error");
+        setSyncReady(false);
         setError(e instanceof Error ? e.message : "Errore");
       }
     })();
     return () => { cancelled = true; };
-  }, [sheetsUrl]);
+    // applyRemote chiude sulle ref, non sullo stato
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheetsUrl, session, pullNonce]);
 
-  // salvataggio locale immediato + sync su Sheets con debounce di 2s
   useEffect(() => {
-    saveLocal(state);
-    if (firstRun.current) {
-      firstRun.current = false;
+    if (!sheetsUrl || !syncReady || conflict || !tokenUsable(session)) return;
+    if (!baseState.current) return;
+    if (contentKey(state) === contentKey(baseState.current)) return;
+    const problems = validateState(state);
+    if (problems.length) {
+      setStatus("error");
+      setError(problems.slice(0, 2).join(" "));
       return;
     }
-    if (!sheetsUrl || !synced || conflict) return;
+    const gen = ++editGen.current;
+    const sent = state;
+    const token = session.token;
+    const expected = baseRevision.current;
+    const base = clone(baseState.current);
     setStatus("saving");
-    const t = setTimeout(async () => {
+    const timer = window.setTimeout(async () => {
       try {
-        // se nel frattempo un collega ha salvato, non si sovrascrive in silenzio
-        const remote = await pullFromSheets(sheetsUrl);
-        if (remote && remote.updatedAt !== base.current) {
+        const res = await pushToSheets(sheetsUrl, token, { expectedRevision: expected, baseState: base, state: sent });
+        if (res.conflict) {
+          const remote = acceptState(res.state);
+          if (!remote) throw new Error("Il foglio contiene dati non validi");
+          conflictRev.current = res.revision ?? 0;
           setConflict(remote);
+          setConflictNames(res.conflicts ?? []);
           setStatus("error");
-          setError("Un collega ha salvato modifiche più recenti");
+          setError(res.conflicts?.length ? "Conflitto sugli stessi elementi" : "Un collega ha salvato modifiche più recenti");
           return;
         }
-        await pushToSheets(sheetsUrl, state);
-        base.current = state.updatedAt;
+        if (!res.ok || res.state == null) throw new Error(res.error || "Errore");
+        const saved = acceptState(res.state);
+        if (!saved) throw new Error("Il foglio ha restituito dati non validi");
+        baseRevision.current = res.revision ?? expected;
+        baseState.current = clone(saved);
+        setRemoteRevision(res.revision ?? 0);
+        if (editGen.current !== gen && res.merged) {
+          conflictRev.current = res.revision ?? 0;
+          setConflict(saved);
+          setConflictNames(["Modifiche arrivate mentre stavi scrivendo"]);
+          setStatus("error");
+          return;
+        }
+        if (contentKey(saved) !== contentKey(sent)) setState(saved);
         setStatus("saved");
         setError("");
       } catch (e) {
@@ -117,72 +214,172 @@ export default function AIActivityMapper() {
         setError(e instanceof Error ? e.message : "Errore");
       }
     }, 2000);
-    return () => clearTimeout(t);
-  }, [state, sheetsUrl, synced, conflict]);
+    return () => window.clearTimeout(timer);
+  }, [state, sheetsUrl, syncReady, conflict, session]);
 
-  const pull = async () => {
-    if (!sheetsUrl) return;
-    try {
-      const remote = await pullFromSheets(sheetsUrl);
-      if (remote) {
-        adopt(remote);
-        setSynced(true);
-      } else {
-        setError("Il foglio non contiene ancora dati");
-      }
-    } catch (e) {
-      setStatus("error");
-      setError(e instanceof Error ? e.message : "Errore");
+  useEffect(() => {
+    if (tab !== "Storico" || !sheetsUrl || !tokenUsable(session) || !syncReady) return;
+    let cancelled = false;
+    listServerSnapshots(sheetsUrl, session.token).then((res) => {
+      if (!cancelled && res.ok && res.snapshots) setServerSnaps(res.snapshots);
+    }).catch(() => { /* la sezione Drive resta vuota */ });
+    return () => { cancelled = true; };
+  }, [tab, sheetsUrl, session, syncReady, remoteRevision]);
+
+  const commit = (patch: Partial<AppState>) =>
+    setState((s) => ({ ...s, ...patch, updatedAt: new Date().toISOString() }));
+
+  const forcePush = async (next: AppState) => {
+    if (!sheetsUrl || !tokenUsable(sessionRef.current)) {
+      setState(next);
+      return;
     }
+    setStatus("saving");
+    const res = await pushToSheets(sheetsUrl, sessionRef.current.token, {
+      expectedRevision: baseRevision.current,
+      baseState: baseState.current,
+      state: next,
+      force: true,
+    });
+    if (!res.ok || res.state == null) throw new Error(res.error || "Errore");
+    const saved = acceptState(res.state);
+    if (!saved) throw new Error("Dati non validi");
+    baseRevision.current = res.revision ?? 0;
+    baseState.current = clone(saved);
+    setRemoteRevision(res.revision ?? 0);
+    setConflict(null);
+    setConflictNames([]);
+    setState(saved);
+    setSyncReady(true);
+    setRevealed(true);
+    setStatus("saved");
+    setError("");
   };
 
   const overwrite = async () => {
-    if (!sheetsUrl) return;
+    remember("Prima di sovrascrivere il foglio");
     try {
-      await pushToSheets(sheetsUrl, state);
-      base.current = state.updatedAt;
-      setConflict(null);
-      setStatus("saved");
-      setError("");
+      await forcePush(stateRef.current);
     } catch (e) {
       setStatus("error");
       setError(e instanceof Error ? e.message : "Errore");
     }
   };
 
-  const onImport = async (f: File | undefined) => {
-    if (!f) return;
+  const loadExample = async () => {
+    remember("Prima del caricamento dell'esempio");
     try {
-      const parsed = migrate(JSON.parse(await f.text()));
-      if (!parsed) throw new Error("versione non supportata");
-      setState(parsed);
+      await forcePush(sampleState());
       setNotice("");
-    } catch {
-      setNotice("File JSON non valido o di una versione non supportata.");
+    } catch (e) {
+      setStatus("error");
+      setError(e instanceof Error ? e.message : "Errore");
     }
   };
 
-  const saveSnap = (label: string) => {
-    const next = [{ id: uid(), label, date: new Date().toISOString(), state }, ...snapshots].slice(0, 20);
+  const onImport = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const migrated = migrate(JSON.parse(await file.text()));
+      if (!migrated) throw new Error("versione non supportata");
+      const problems = validateState(migrated);
+      if (problems.length) throw new Error(problems.slice(0, 3).join(" "));
+      remember("Prima dell'import JSON");
+      setState({ ...migrated, example: false, updatedAt: new Date().toISOString() });
+      setNotice("");
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "File JSON non valido o di una versione non supportata.");
+    }
+  };
+
+  const saveSnap = async (label: string) => {
+    remember(label);
+    if (!sheetsUrl || !syncReady || !tokenUsable(sessionRef.current) || conflict) return;
+    try {
+      let current = stateRef.current;
+      if (baseState.current && contentKey(current) !== contentKey(baseState.current)) {
+        const pushed = await pushToSheets(sheetsUrl, sessionRef.current.token, {
+          expectedRevision: baseRevision.current,
+          baseState: baseState.current,
+          state: current,
+        });
+        if (pushed.conflict && pushed.state) {
+          const remote = acceptState(pushed.state);
+          if (remote) {
+            conflictRev.current = pushed.revision ?? 0;
+            setConflict(remote);
+            setConflictNames(pushed.conflicts ?? []);
+          }
+          setNotice("Copia salvata in questo browser. Sul Drive manca perché c'è un conflitto da risolvere.");
+          return;
+        }
+        if (!pushed.ok || pushed.state == null) throw new Error(pushed.error || "Errore");
+        const saved = acceptState(pushed.state);
+        if (!saved) throw new Error("Dati non validi");
+        baseRevision.current = pushed.revision ?? baseRevision.current;
+        baseState.current = clone(saved);
+        setRemoteRevision(pushed.revision ?? 0);
+        if (contentKey(saved) !== contentKey(current)) setState(saved);
+        current = saved;
+      }
+      const snap = await snapshotOnSheets(sheetsUrl, sessionRef.current.token, label);
+      if (!snap.ok) throw new Error(snap.error || "Errore");
+      const listed = await listServerSnapshots(sheetsUrl, sessionRef.current.token);
+      if (listed.ok && listed.snapshots) setServerSnaps(listed.snapshots);
+      setNotice("Istantanea salvata anche sul Drive.");
+      setStatus("saved");
+    } catch (e) {
+      setNotice(`Copia salvata in questo browser. Sul Drive: ${e instanceof Error ? e.message : "errore"}`);
+    }
+  };
+
+  const deleteSnap = (id: string) => {
+    const next = snapsRef.current.filter((s) => s.id !== id);
+    snapsRef.current = next;
     setSnapshots(next);
     saveSnapshots(next);
   };
-  const deleteSnap = (id: string) => {
-    const next = snapshots.filter((s) => s.id !== id);
-    setSnapshots(next);
-    saveSnapshots(next);
+
+  const restoreServer = async (id: string) => {
+    if (!sheetsUrl || !tokenUsable(sessionRef.current)) return;
+    remember("Prima del ripristino dallo storico");
+    try {
+      const res = await restoreServerSnapshot(sheetsUrl, sessionRef.current.token, id, baseRevision.current);
+      if (res.conflict && res.state) {
+        const remote = acceptState(res.state);
+        if (!remote) throw new Error("Il foglio contiene dati non validi");
+        conflictRev.current = res.revision ?? 0;
+        setConflict(remote);
+        setConflictNames(res.conflicts ?? []);
+        setStatus("error");
+        setError("Il foglio è cambiato: scegli cosa tenere prima di ripristinare");
+        return;
+      }
+      if (!res.ok || res.state == null) throw new Error(res.error || "Errore");
+      const saved = acceptState(res.state);
+      if (!saved) throw new Error("Snapshot non valido");
+      applyRemote(saved, res.revision ?? 0, null);
+      setStatus("saved");
+      setNotice("Ripristino salvato come nuova revisione.");
+    } catch (e) {
+      setStatus("error");
+      setError(e instanceof Error ? e.message : "Errore");
+    }
   };
 
   const kpi = useMemo(() => metrics(state), [state]);
   const issues = useMemo(() => runChecks(state), [state]);
+  const blocked = Boolean(sheetsUrl) && !syncReady;
+  const canUploadExample = !state.example && (!sheetsUrl || (syncReady && remoteRevision === 0));
 
   const importActivities = (items: Activity[], mode: "append" | "replace") => {
+    remember(mode === "replace" ? "Prima della sostituzione CSV" : "Prima dell'import CSV");
     if (mode === "append") {
       commit({ activities: [...state.activities, ...items] });
     } else {
       commit({
+        example: false,
         activities: items,
-        workflows: state.workflows,
         blockers: state.blockers.map((b) => ({ ...b, activityIds: [] })),
         microTools: state.microTools.map((t) => ({ ...t, activityIds: [] })),
         actuals: {},
@@ -193,127 +390,212 @@ export default function AIActivityMapper() {
     setTab("Tabella");
   };
 
+  const onTabKey = (event: KeyboardEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.getAttribute("role") !== "tab") return;
+    const index = TABS.indexOf(tab);
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % TABS.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + TABS.length) % TABS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = TABS.length - 1;
+    else return;
+    event.preventDefault();
+    const name = TABS[next];
+    setTab(name);
+    document.getElementById(tabDomId(name))?.focus();
+  };
+
+  const workLocal = () => {
+    setSheetsUrl("");
+    saveSheetsUrl("");
+    setStatus("off");
+    setError("");
+    setSyncReady(true);
+    setRevealed(true);
+  };
+
   return (
     <div className="mx-auto max-w-6xl space-y-5 p-4 md:p-6">
-      <header className="flex flex-wrap items-center gap-3">
-        <div className="min-w-0 flex-1">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start">
+        <div className="w-full sm:min-w-0 sm:flex-1">
           <h1 className="text-2xl font-bold tracking-tight">AI Activity Mapper</h1>
           <p className="text-sm text-slate-500">Cosa automatizzare, cosa aumentare, cosa lasciare umano.</p>
         </div>
-        <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${status === "error" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
-          {STATUS_LABEL[status]}
-        </span>
-        <button className="btn" onClick={() => setShowSync(true)}>Sheets</button>
-        <button className="btn" onClick={() => setShowCsv(true)}>Import CSV</button>
-        <button className="btn" onClick={() => exportCsv(state)}>CSV</button>
-        <button className="btn" onClick={() => exportJson(state)}>Export JSON</button>
-        <button className="btn" onClick={() => fileRef.current?.click()}>Import JSON</button>
-        <input ref={fileRef} type="file" accept="application/json" hidden onChange={(e) => onImport(e.target.files?.[0])} />
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+          <span role="status" className={`rounded-full px-2.5 py-1 text-xs font-medium ${status === "error" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
+            {STATUS_LABEL[status]}{session?.email ? ` · ${session.email}` : ""}
+          </span>
+          <button type="button" className="btn" onClick={() => setShowSync(true)}>Sheets</button>
+          <button type="button" className="btn" onClick={() => setShowCsv(true)} disabled={blocked}>Import CSV</button>
+          <button type="button" className="btn" onClick={() => exportCsv(state)} disabled={blocked}>CSV</button>
+          <button type="button" className="btn" onClick={() => exportJson(state)} disabled={blocked}>Export JSON</button>
+          <button type="button" className="btn" onClick={() => fileRef.current?.click()} disabled={blocked}>Import JSON</button>
+          <input ref={fileRef} type="file" accept="application/json" hidden onChange={(e) => { onImport(e.target.files?.[0]); e.target.value = ""; }} />
+        </div>
       </header>
 
-      {conflict && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900" role="alert">
-          <div className="font-semibold">Un collega ha salvato modifiche più recenti sul foglio.</div>
-          <p className="mt-1">Per non cancellare il suo lavoro, il tuo salvataggio è in pausa. Scegli cosa tenere.</p>
+      {!revealed && (
+        <section className="card space-y-3 p-6" aria-busy={status === "loading"}>
+          <h2 className="text-lg font-semibold">Collegamento al foglio</h2>
+          {status === "loading" && <p className="text-sm text-slate-600">Caricamento del foglio. La modifica è sospesa finché non arriva la risposta.</p>}
+          {status === "auth" && (
+            <>
+              <p className="text-sm text-slate-600">Accedi con Google per leggere il foglio. I dati di esempio non vengono inviati.</p>
+              <GoogleSignInButton onCredential={onCredential} />
+            </>
+          )}
+          {status === "error" && (
+            <>
+              <p className="text-sm text-rose-700">{error || "Impossibile leggere il foglio."}</p>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="btn-primary" onClick={() => setPullNonce((n) => n + 1)}>Riprova</button>
+                <button type="button" className="btn" onClick={workLocal}>Continua solo in questo browser</button>
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
+      {revealed && state.example && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          <p className="font-semibold">Dati di esempio</p>
+          <p className="mt-1">Attività, persone e clienti sono illustrativi e non descrivono il tuo team.</p>
           <div className="mt-2 flex flex-wrap gap-2">
-            <button className="btn-primary" onClick={() => adopt(conflict)}>Carica le sue modifiche (perdo le mie)</button>
-            <button className="btn" onClick={overwrite}>Sovrascrivi con le mie</button>
+            <ConfirmButton className="btn" confirmLabel="Svuotare?" onConfirm={() => { remember("Prima di partire da zero"); setState(emptyState()); }}>Parti da zero</ConfirmButton>
+            <button type="button" className="btn-primary" onClick={() => commit({ example: false })}>Questi sono i miei dati</button>
           </div>
         </div>
       )}
 
-      {notice && <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{notice}</div>}
-
-      {tab !== "Executive" && (
-        <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
-          {[
-            ["Attività mappate", fmt(kpi.n), ""],
-            ["Ore/mese oggi", fmt(kpi.manual), ""],
-            ["Ore liberate", `${fmt(kpi.freed)} (${fmt(kpi.freedPct)}%)`, "text-emerald-700"],
-            ["Ore potenziate", fmt(kpi.reinv), "text-sky-700"],
-            ["Liberate: da classificare", `${fmt(kpi.unalloc)} su ${fmt(kpi.freed)}`, kpi.unalloc > 0 ? "text-amber-600" : "text-emerald-700"],
-          ].map(([l, v, c]) => (
-            <div key={l} className="card p-4">
-              <div className="label">{l}</div>
-              <div className={`text-xl font-semibold ${c}`}>{v}</div>
+      {revealed && blocked && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950" role="status">
+          <p className="font-semibold">Modifica sospesa</p>
+          <p className="mt-1">{status === "auth" ? "La sessione Google è scaduta o manca. Accedi di nuovo per continuare sul foglio." : (error || "Attendi il foglio.")}</p>
+          {status === "auth" && <div className="mt-2"><GoogleSignInButton onCredential={onCredential} /></div>}
+          {status === "error" && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button type="button" className="btn-primary" onClick={() => setPullNonce((n) => n + 1)}>Riprova</button>
+              <button type="button" className="btn" onClick={workLocal}>Continua solo in questo browser</button>
             </div>
-          ))}
-        </section>
+          )}
+        </div>
       )}
 
-      <nav className="flex gap-1 overflow-x-auto border-b border-slate-200">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`-mb-px shrink-0 border-b-2 px-4 py-2 text-sm font-medium ${tab === t ? "border-indigo-600 text-indigo-700" : "border-transparent text-slate-500 hover:text-slate-800"}`}
-          >
-            {t}
-            {t === "Controlli" && issues.length > 0 && (
-              <span className="ml-1.5 rounded-full bg-rose-100 px-1.5 text-[11px] text-rose-700">{issues.length}</span>
+      {conflict && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900" role="alert">
+          <div className="font-semibold">Gli stessi elementi sono stati modificati da un collega.</div>
+          <p className="mt-1">Le modifiche su attività diverse si uniscono da sole. Qui va scelto cosa tenere.</p>
+          {conflictNames.length > 0 && <p className="mt-1">In conflitto: {conflictNames.join(", ")}.</p>}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" className="btn-primary" onClick={() => { remember("Prima di caricare le modifiche remote"); applyRemote(conflict, conflictRev.current, null); setStatus("idle"); setError(""); }}>Carica le sue modifiche (perdo le mie)</button>
+            <button type="button" className="btn" onClick={overwrite}>Sovrascrivi con le mie</button>
+          </div>
+        </div>
+      )}
+
+      {notice && <div className="rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700" role="status">{notice}</div>}
+
+      {revealed && (
+        <div ref={(node) => { if (node) node.toggleAttribute("inert", blocked); }} className={blocked ? "opacity-60" : undefined}>
+          {tab !== "Executive" && (
+            <section className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-5">
+              {[
+                ["Attività mappate", fmt(kpi.n), ""],
+                ["Ore/mese oggi", fmt(kpi.manual), ""],
+                ["Ore liberate", `${fmt(kpi.freed)} (${fmt(kpi.freedPct)}%)`, "text-emerald-700"],
+                ["Ore potenziate", fmt(kpi.reinv), "text-sky-700"],
+                ["Liberate: da classificare", `${fmt(kpi.unalloc)} su ${fmt(kpi.freed)}`, kpi.unalloc > 0 ? "text-amber-600" : "text-emerald-700"],
+              ].map(([l, v, c]) => (
+                <div key={l} className="card p-4">
+                  <div className="label">{l}</div>
+                  <div className={`text-xl font-semibold ${c}`}>{v}</div>
+                </div>
+              ))}
+            </section>
+          )}
+
+          <div role="tablist" aria-label="Viste" className="flex gap-1 overflow-x-auto border-b border-slate-200" onKeyDown={onTabKey}>
+            {TABS.map((t) => (
+              <button
+                key={t}
+                type="button"
+                role="tab"
+                id={tabDomId(t)}
+                aria-selected={tab === t}
+                aria-controls="pannello-vista"
+                tabIndex={tab === t ? 0 : -1}
+                onClick={() => setTab(t)}
+                className={`-mb-px shrink-0 border-b-2 px-4 py-2 text-sm font-medium ${tab === t ? "border-indigo-600 text-indigo-700" : "border-transparent text-slate-500 hover:text-slate-800"}`}
+              >
+                {t}
+                {t === "Controlli" && issues.length > 0 && (
+                  <>
+                    <span className="ml-1.5 rounded-full bg-rose-100 px-1.5 text-[11px] text-rose-700" aria-hidden="true">{issues.length}</span>
+                    <span className="sr-only">, {issues.length} avvisi</span>
+                  </>
+                )}
+              </button>
+            ))}
+          </div>
+
+          <div role="tabpanel" id="pannello-vista" aria-labelledby={tabDomId(tab)} className="pt-5" tabIndex={0}>
+            {tab === "Executive" && (
+              <ExecutiveView state={state} onGo={(t) => setTab(t as Tab)} onSettings={(p) => commit({ settings: { ...state.settings, ...p } })} />
             )}
-          </button>
-        ))}
-      </nav>
-
-      {tab === "Executive" && (
-        <ExecutiveView
-          state={state}
-          onGo={(t) => setTab(t as Tab)}
-          onSettings={(p) => commit({ settings: { ...state.settings, ...p } })}
-        />
-      )}
-      {tab === "Riepilogo" && <SummaryView activities={state.activities} onChange={(activities) => commit({ activities })} />}
-      {tab === "Teams" && (
-        <TeamsView
-          activities={state.activities}
-          blockers={state.blockers}
-          microTools={state.microTools}
-          onChange={(activities) => commit({ activities })}
-          onChangeBlockers={(blockers) => commit({ blockers })}
-          onChangeTools={(microTools) => commit({ microTools })}
-        />
-      )}
-      {tab === "Workflows" && <WorkflowsView workflows={state.workflows} onChange={(workflows) => commit({ workflows })} />}
-      {tab === "Matrix" && <MatrixView activities={state.activities} />}
-      {tab === "Roadmap" && <RoadmapView activities={state.activities} blockers={state.blockers} />}
-      {tab === "Collegamenti" && (
-        <LinksView
-          activities={state.activities}
-          blockers={state.blockers}
-          microTools={state.microTools}
-          hourlyCost={state.settings.hourlyCost}
-          onChangeBlockers={(blockers) => commit({ blockers })}
-          onChangeTools={(microTools) => commit({ microTools })}
-        />
-      )}
-      {tab === "Misurazione" && (
-        <MeasureView
-          state={state}
-          onActuals={(actuals) => commit({ actuals })}
-          onActivities={(activities) => commit({ activities })}
-        />
-      )}
-      {tab === "Staffing" && (
-        <StaffingView
-          state={state}
-          onClients={(clients) => commit({ clients })}
-          onPeople={(people) => commit({ people })}
-          onSettings={(p) => commit({ settings: { ...state.settings, ...p } })}
-        />
-      )}
-      {tab === "AS-IS / TO-BE" && <ToBeView state={state} onGo={(t) => setTab(t as Tab)} />}
-      {tab === "Agenti" && <AgentsView state={state} onGo={(t) => setTab(t as Tab)} />}
-      {tab === "Tabella" && <TableView activities={state.activities} onChange={(activities) => commit({ activities })} />}
-      {tab === "Controlli" && <QualityView issues={issues} onGo={(t) => setTab(t as Tab)} />}
-      {tab === "Storico" && (
-        <HistoryView
-          state={state}
-          snapshots={snapshots}
-          onSave={saveSnap}
-          onRestore={(s) => { setState(s.state); setNotice(""); }}
-          onDelete={deleteSnap}
-        />
+            {tab === "Riepilogo" && <SummaryView activities={state.activities} onChange={(activities) => commit({ activities })} />}
+            {tab === "Teams" && (
+              <TeamsView
+                activities={state.activities}
+                blockers={state.blockers}
+                microTools={state.microTools}
+                onChange={(activities) => commit({ activities })}
+                onChangeBlockers={(blockers) => commit({ blockers })}
+                onChangeTools={(microTools) => commit({ microTools })}
+              />
+            )}
+            {tab === "Workflows" && <WorkflowsView workflows={state.workflows} onChange={(workflows) => commit({ workflows })} />}
+            {tab === "Matrix" && <MatrixView activities={state.activities} />}
+            {tab === "Roadmap" && <RoadmapView activities={state.activities} blockers={state.blockers} />}
+            {tab === "Collegamenti" && (
+              <LinksView
+                activities={state.activities}
+                blockers={state.blockers}
+                microTools={state.microTools}
+                hourlyCost={state.settings.hourlyCost}
+                onChangeBlockers={(blockers) => commit({ blockers })}
+                onChangeTools={(microTools) => commit({ microTools })}
+              />
+            )}
+            {tab === "Misurazione" && (
+              <MeasureView state={state} onActuals={(actuals) => commit({ actuals })} onActivities={(activities) => commit({ activities })} />
+            )}
+            {tab === "Staffing" && (
+              <StaffingView
+                state={state}
+                onClients={(clients) => commit({ clients })}
+                onPeople={(people) => commit({ people })}
+                onSettings={(p) => commit({ settings: { ...state.settings, ...p } })}
+              />
+            )}
+            {tab === "AS-IS / TO-BE" && <ToBeView state={state} onGo={(t) => setTab(t as Tab)} />}
+            {tab === "Agenti" && <AgentsView state={state} onGo={(t) => setTab(t as Tab)} />}
+            {tab === "Tabella" && <TableView activities={state.activities} onChange={(activities) => commit({ activities })} />}
+            {tab === "Controlli" && <QualityView issues={issues} onGo={(t) => setTab(t as Tab)} />}
+            {tab === "Storico" && (
+              <HistoryView
+                state={state}
+                snapshots={snapshots}
+                serverSnapshots={serverSnaps}
+                serverReady={Boolean(sheetsUrl) && syncReady && tokenUsable(session)}
+                onSave={saveSnap}
+                onRestore={(s) => { remember("Prima del ripristino locale"); setState({ ...clone(s.state), updatedAt: new Date().toISOString() }); setNotice(""); }}
+                onDelete={deleteSnap}
+                onRestoreServer={restoreServer}
+              />
+            )}
+          </div>
+        </div>
       )}
 
       {showCsv && <ImportCsvModal existing={state.activities.length} onImport={importActivities} onClose={() => setShowCsv(false)} />}
@@ -323,8 +605,26 @@ export default function AIActivityMapper() {
           url={sheetsUrl}
           status={status}
           error={error}
-          onSaveUrl={(u) => { setSheetsUrl(u); saveSheetsUrl(u); setStatus(u ? "idle" : "off"); }}
-          onPull={pull}
+          email={session?.email ?? ""}
+          canUploadExample={canUploadExample}
+          onCredential={onCredential}
+          onSignOut={signOut}
+          onSaveUrl={(u) => {
+            setSheetsUrl(u);
+            saveSheetsUrl(u);
+            setPullNonce((n) => n + 1);
+            if (!u) {
+              setStatus("off");
+              setSyncReady(true);
+              setRevealed(true);
+            } else {
+              setRevealed(false);
+              setSyncReady(false);
+            }
+            setShowSync(false);
+          }}
+          onPull={() => { setPullNonce((n) => n + 1); setShowSync(false); }}
+          onUploadExample={() => { setShowSync(false); void loadExample(); }}
           onClose={() => setShowSync(false)}
         />
       )}
