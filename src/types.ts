@@ -50,7 +50,7 @@ export interface Team {
   color: string;
 }
 
-/** Micro-task dentro una macro-attività (es. keyword research -> 7 micro-task) */
+/** Micro-task dentro una macro-attività. Dalla versione 6 i task vivi stanno in AppState.tasks. */
 export interface SubTask {
   id: string;
   name: string;
@@ -59,6 +59,24 @@ export interface SubTask {
   treatment: Treatment;
   /** % di ore risparmiate (automazione: tipicamente 100, augmentation: meno) */
   pctSaved: number;
+}
+
+/** Task di primo livello: una riga in Entita, modificabile da solo, unito per id. */
+export interface WorkTask {
+  id: string;
+  activityId: string;
+  name: string;
+  notes: string;
+  teamId: TeamId;
+  /** ore/mese; per "nuovo" è lavoro che prima non esisteva */
+  hours: number;
+  treatment: Treatment;
+  pctSaved: number;
+  /** 0 = non indicata su questo task */
+  runsPerMonth: number;
+  tools: string;
+  owner: string;
+  order: number;
 }
 
 export interface Activity {
@@ -176,10 +194,12 @@ export interface Workflow {
 }
 
 export interface AppState {
-  version: 5;
+  version: 6;
   /** true finché è in uso il dataset di esempio, non i dati del team */
   example?: boolean;
   activities: Activity[];
+  /** task scomposti, uno per riga. Le attività restano il raggruppamento. */
+  tasks: WorkTask[];
   workflows: Workflow[];
   blockers: Blocker[];
   microTools: MicroTool[];

@@ -3,13 +3,12 @@
  *
  * Deploy: il file va incollato in un Apps Script collegato al foglio
  * (Estensioni > Apps Script). Esegui come: te. Accesso: Chiunque.
- * «Chiunque» serve solo perché il browser possa chiamare l'URL;
- * doGet e doPost rifiutano chi non presenta un ID token Google
- * di un'email elencata in ALLOWED_EMAILS.
+ * «Chiunque» serve solo perché il browser possa chiamare l'URL.
+ * Ogni POST deve portare la password nel corpo (proprietà APP_PASSWORD).
+ * doGet non accetta la password nell'indirizzo e risponde con un errore.
  *
  * Proprietà dello script (Impostazioni progetto > Proprietà dello script):
- *   OAUTH_CLIENT_ID  client ID OAuth web (lo stesso di VITE_GOOGLE_CLIENT_ID)
- *   ALLOWED_EMAILS   email autorizzate, separate da virgola
+ *   APP_PASSWORD   password condivisa del team
  *
  * Sorgente dei dati: foglio Entita, una riga per elemento (niente JSON unico in A1).
  * I fogli Attivita, Blocker, MicroTool, Persone, Clienti, Misurato sono report
@@ -37,52 +36,52 @@ var CAD = ["on_demand", "giornaliera", "settimanale", "mensile"];
 var SEN = ["junior", "mid", "senior", "lead"];
 var CSTAT = ["attivo", "gara", "prospect"];
 
-function doGet(e) {
-  try {
-    verifyToken_(e && e.parameter ? e.parameter.token : "");
-    return json_(withLock_(pull_));
-  } catch (err) {
-    return json_({ ok: false, error: String(err.message || err) });
-  }
+function doGet() {
+  return json_({ ok: false, error: "La lettura avviene con POST: la password va nel corpo, non nell'indirizzo." });
 }
 
 function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents);
-    var email = verifyToken_(body.token);
+    checkPassword_(body && body.password);
+    var actor = "";
     if (body.action === "pull") return json_(withLock_(pull_));
-    if (body.action === "push") return json_(withLock_(function () { return push_(body, email); }));
-    if (body.action === "snapshot") return json_(withLock_(function () { return snapshot_(body, email); }));
+    if (body.action === "push") return json_(withLock_(function () { return push_(body, actor); }));
+    if (body.action === "snapshot") return json_(withLock_(function () { return snapshot_(body, actor); }));
     if (body.action === "listSnapshots") return json_(withLock_(listSnapshots_));
-    if (body.action === "restore") return json_(withLock_(function () { return restore_(body, email); }));
+    if (body.action === "restore") return json_(withLock_(function () { return restore_(body, actor); }));
     return json_({ ok: false, error: "Azione sconosciuta" });
   } catch (err) {
     return json_({ ok: false, error: String(err.message || err) });
   }
 }
 
-function verifyToken_(token) {
-  if (!token) throw new Error("Accesso richiesto");
-  var props = PropertiesService.getScriptProperties();
-  var clientId = String(props.getProperty("OAUTH_CLIENT_ID") || "").trim();
-  var allowed = String(props.getProperty("ALLOWED_EMAILS") || "")
-    .split(/[,;\s]+/)
-    .map(function (s) { return s.trim().toLowerCase(); })
-    .filter(Boolean);
-  if (!clientId) throw new Error("Manca OAUTH_CLIENT_ID nelle proprietà dello script");
-  if (!allowed.length) throw new Error("Manca ALLOWED_EMAILS nelle proprietà dello script");
-  var res = UrlFetchApp.fetch(
-    "https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(token),
-    { muteHttpExceptions: true }
-  );
-  if (res.getResponseCode() !== 200) throw new Error("Token non valido o scaduto");
-  var info = JSON.parse(res.getContentText());
-  if (info.aud !== clientId) throw new Error("Token emesso per un altro client");
-  var verified = info.email_verified === true || info.email_verified === "true";
-  if (!verified) throw new Error("Email non verificata");
-  var email = String(info.email || "").toLowerCase();
-  if (allowed.indexOf(email) < 0) throw new Error("Email non autorizzata");
-  return email;
+var PW_FAILS = "aam-pw-fails";
+var PW_LOCK_SECONDS = 180;
+
+function checkPassword_(given) {
+  var expected = String(PropertiesService.getScriptProperties().getProperty("APP_PASSWORD") || "");
+  if (!expected) throw new Error("Manca APP_PASSWORD nelle proprietà dello script");
+  var cache = CacheService.getScriptCache();
+  var fails = Number(cache.get(PW_FAILS) || "0");
+  if (fails >= 10) throw new Error("Troppi tentativi falliti. Riprova tra qualche minuto.");
+  if (!constantEquals_(String(given || ""), expected)) {
+    Utilities.sleep(Math.min(8, fails + 1) * 250);
+    cache.put(PW_FAILS, String(fails + 1), PW_LOCK_SECONDS);
+    throw new Error("Password non corretta");
+  }
+  cache.remove(PW_FAILS);
+}
+
+function constantEquals_(given, expected) {
+  var len = Math.max(given.length, expected.length);
+  var diff = given.length === expected.length ? 0 : 1;
+  for (var i = 0; i < len; i++) {
+    var a = i < given.length ? given.charCodeAt(i) : 0;
+    var b = i < expected.length ? expected.charCodeAt(i) : 0;
+    diff |= a ^ b;
+  }
+  return diff === 0;
 }
 
 function withLock_(fn) {
@@ -135,7 +134,7 @@ function push_(body, email) {
   }
   next = JSON.parse(JSON.stringify(next));
   next.updatedAt = new Date().toISOString();
-  next.version = 5;
+  next.version = 6;
   var reportsAt = doc.reportsAt || "";
   if (reportsDue_(doc, !!body.force)) {
     refreshReports_(next);
@@ -185,7 +184,7 @@ function restore_(body, email) {
   if (doc.state) writeHistory_(email, "Prima del ripristino", doc);
   var next = JSON.parse(JSON.stringify(data.state));
   next.updatedAt = new Date().toISOString();
-  next.version = 5;
+  next.version = 6;
   refreshReports_(next);
   var revision = (doc.revision || 0) + 1;
   writeDoc_(revision, next, email, new Date().toISOString());
@@ -242,10 +241,11 @@ function defaultLabel_() {
 function mergeState_(base, server, client) {
   var conflicts = [];
   var state = {
-    version: 5,
+    version: 6,
     example: mergeFlag_(base, server, client, conflicts),
     updatedAt: server.updatedAt,
     activities: mergeById_("Attività", base.activities, server.activities, client.activities, conflicts),
+    tasks: mergeById_("Task", base.tasks, server.tasks, client.tasks, conflicts),
     blockers: mergeById_("Blocker", base.blockers, server.blockers, client.blockers, conflicts),
     microTools: mergeById_("Micro-tool", base.microTools, server.microTools, client.microTools, conflicts),
     people: mergeById_("Persona", base.people, server.people, client.people, conflicts),
@@ -344,7 +344,8 @@ function validateState_(state) {
   var errors = [];
   function push(message) { if (errors.length < 30) errors.push(message); }
   if (!state || typeof state !== "object" || isArray_(state)) return ["Lo stato non è un oggetto"];
-  if (state.version !== 5) push("Versione non supportata (attesa la 5)");
+  if (state.version !== 6 && state.version !== 5) push("Versione non supportata (attesa la 6)");
+  if (state.version === 6) checkList_(state.tasks, "task", push, checkTask_);
   if (state.example !== undefined && typeof state.example !== "boolean") push("example non è un booleano");
   if (typeof state.updatedAt !== "string") push("Manca updatedAt");
   checkList_(state.activities, "attività", push, checkActivity_);
@@ -382,6 +383,17 @@ function checkList_(list, kind, push, each) {
     seen[item.id] = true;
     each(item, kind + " «" + (item.name || item.id) + "»", push);
   });
+}
+
+function checkTask_(t, label, push) {
+  if (typeof t.activityId !== "string" || !t.activityId) push(label + ": attività mancante");
+  if (typeof t.name !== "string" || typeof t.notes !== "string" || typeof t.tools !== "string" || typeof t.owner !== "string") {
+    push(label + ": campi di testo mancanti");
+  }
+  if (!has_(TEAMS, t.teamId) || !has_(TREAT, t.treatment)) push(label + ": team o trattamento non valido");
+  if (!isNum_(t.hours, 0, 1e9) || !isNum_(t.pctSaved, 0, 100) || !isNum_(t.runsPerMonth, 0, 1e9) || !isNum_(t.order, 0, 1e9)) {
+    push(label + ": numeri non validi");
+  }
 }
 
 function checkActivity_(a, label, push) {
@@ -464,7 +476,7 @@ function readDoc_() {
   var values = sh.getDataRange().getValues();
   var doc = { revision: 0, updatedAt: "", updatedBy: "", reportsAt: "", example: false, state: null };
   if (!values || values.length < 2) return doc;
-  var buckets = { activity: [], workflow: [], blocker: [], microTool: [], person: [], client: [] };
+  var buckets = { activity: [], task: [], workflow: [], blocker: [], microTool: [], person: [], client: [] };
   var actuals = {};
   var settings = null;
   for (var i = 1; i < values.length; i++) {
@@ -479,6 +491,7 @@ function readDoc_() {
       doc.updatedBy = parsed.updatedBy || "";
       doc.reportsAt = parsed.reportsAt || "";
       doc.example = !!parsed.example;
+      doc.version = parsed.version;
     } else if (buckets[kind]) buckets[kind].push(parsed);
     else if (kind === "actual") actuals[id] = parsed;
     else if (kind === "settings") settings = parsed;
@@ -486,10 +499,11 @@ function readDoc_() {
   if (!doc.revision) return doc;
   doc.example = doc.example;
   doc.state = {
-    version: 5,
+    version: Number(doc.version || (buckets.task.length ? 6 : 5)),
     example: doc.example,
     updatedAt: doc.updatedAt,
     activities: buckets.activity,
+    tasks: buckets.task,
     workflows: buckets.workflow,
     blockers: buckets.blocker,
     microTools: buckets.microTool,
@@ -509,8 +523,10 @@ function writeDoc_(revision, state, email, reportsAt) {
     updatedBy: email,
     reportsAt: reportsAt || "",
     example: !!state.example,
+    version: state.version || 6,
   })]);
   pushKind_(rows, "activity", state.activities);
+  pushKind_(rows, "task", state.tasks);
   pushKind_(rows, "workflow", state.workflows);
   pushKind_(rows, "blocker", state.blockers);
   pushKind_(rows, "microTool", state.microTools);
@@ -587,8 +603,8 @@ function writeHistory_(email, label, doc) {
 
 function emptyState_() {
   return {
-    version: 5, example: false, updatedAt: new Date().toISOString(),
-    activities: [], workflows: [], blockers: [], microTools: [], people: [], clients: [],
+    version: 6, example: false, updatedAt: new Date().toISOString(),
+    activities: [], tasks: [], workflows: [], blockers: [], microTools: [], people: [], clients: [],
     actuals: {}, settings: { hourlyCost: 40, worstThreshold: 80 },
   };
 }
@@ -613,6 +629,7 @@ function fileInFolder_(file, folder) {
 
 function refreshReports_(state) {
   writeActivities_(state);
+  writeTasks_(state);
   writeBlockers_(state);
   writeTools_(state);
   writePeople_(state);
@@ -653,9 +670,19 @@ function writeActivities_(state) {
       a.complexity, a.riskLevel, a.humanControl, a.tools, a.dependencies, a.notes,
       linked_(state.blockers, a.id), linked_(state.microTools, a.id),
       a.area || "delivery", a.runsPerMonth || 0, a.hoursPerRun || 0,
-      (a.subtasks || []).map(function (s) { return s.name + " (" + s.hours + "h, " + s.treatment + ")"; }).join(" | ")];
+      (state.tasks || []).filter(function (t) { return t.activityId === a.id; }).map(function (t) { return t.name + " (" + t.hours + "h, " + t.treatment + ")"; }).join(" | ")];
   });
   writeTable_("Attivita", head, rows);
+}
+
+function writeTasks_(state) {
+  var names = {};
+  (state.activities || []).forEach(function (a) { names[a.id] = a.name; });
+  var head = ["Attivita", "Task", "Descrizione", "Team", "Uso AI", "Ore/mese", "% risparmiata", "Esecuzioni al mese", "Tool", "Owner"];
+  var rows = (state.tasks || []).map(function (t) {
+    return [names[t.activityId] || t.activityId, t.name, t.notes || "", t.teamId, t.treatment, t.hours, t.pctSaved, t.runsPerMonth || 0, t.tools || "", t.owner || ""];
+  });
+  writeTable_("Task", head, rows);
 }
 
 function writeBlockers_(state) {

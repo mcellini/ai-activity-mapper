@@ -1,4 +1,4 @@
-import type { Activity, AppState, Blocker, MicroTool, Person, TeamId, ToolStatus } from "@/types";
+import type { Activity, AppState, Blocker, MicroTool, Person, SubTask, TeamId, ToolStatus, Treatment, WorkTask } from "@/types";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -72,7 +72,7 @@ const NEED_BY_KIND: Record<string, Blocker["need"]> = {
 };
 
 /** v4 -> v5: frequenza, micro-task, area, bisogni dei blocker, tipo di tool, adozione AI per persona */
-function v4to5(raw: any): AppState {
+function v4to5(raw: any): any {
   const activities: Activity[] = (raw.activities ?? []).map((a: any) => ({
     ...a,
     area: a.area ?? "delivery",
@@ -107,14 +107,114 @@ function v4to5(raw: any): AppState {
     })),
     actuals: raw.actuals ?? {},
     settings: { hourlyCost: 40, worstThreshold: 80, ...(raw.settings ?? {}) },
-  } as AppState;
+  };
 }
 
-/** Porta qualunque versione salvata (v2 ... v5) al formato v5. Ritorna null se non riconosciuta. */
+const TREATMENTS: Treatment[] = ["umano", "automazione", "augmentation", "nuovo"];
+
+function num(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+function treatmentOf(v: unknown): Treatment {
+  return TREATMENTS.includes(v as Treatment) ? (v as Treatment) : "umano";
+}
+
+function normalizeTask(raw: any, fallbackOrder: number): WorkTask {
+  return {
+    id: String(raw?.id || ""),
+    activityId: String(raw?.activityId || ""),
+    name: String(raw?.name || ""),
+    notes: String(raw?.notes || ""),
+    teamId: TEAM_IDS.includes(raw?.teamId) ? raw.teamId : "seo",
+    hours: Math.max(0, num(raw?.hours)),
+    treatment: treatmentOf(raw?.treatment),
+    pctSaved: Math.max(0, Math.min(100, num(raw?.pctSaved))),
+    runsPerMonth: Math.max(0, num(raw?.runsPerMonth)),
+    tools: String(raw?.tools || ""),
+    owner: String(raw?.owner || ""),
+    order: Number.isFinite(raw?.order) ? raw.order : fallbackOrder,
+  };
+}
+
+function taskFromPart(
+  activity: Activity, key: string, name: string, hours: number, treatment: Treatment, pctSaved: number, order: number, notes: string,
+): WorkTask {
+  return {
+    id: `mig-${activity.id}-${key}`,
+    activityId: activity.id,
+    name,
+    notes,
+    teamId: activity.teamId,
+    hours,
+    treatment,
+    pctSaved,
+    runsPerMonth: activity.runsPerMonth || 0,
+    tools: activity.tools || "",
+    owner: "",
+    order,
+  };
+}
+
+/** Scompone i micro-task annidati, o le ore dell'attività, in task con id stabile. Non butta ore. */
+function tasksFromActivity(activity: Activity): WorkTask[] {
+  const subs = activity.subtasks ?? [];
+  if (subs.length) {
+    return subs.map((s: SubTask, i: number) => normalizeTask({
+      id: s.id || `mig-${activity.id}-s${i}`,
+      activityId: activity.id,
+      name: s.name || activity.name,
+      notes: "",
+      teamId: activity.teamId,
+      hours: s.hours,
+      treatment: s.treatment,
+      pctSaved: s.pctSaved,
+      runsPerMonth: activity.runsPerMonth || 0,
+      tools: activity.tools || "",
+      owner: "",
+      order: i,
+    }, i));
+  }
+  const manual = Math.max(0, num(activity.hoursManual));
+  const freed = Math.min(Math.max(0, num(activity.hoursFreed)), manual);
+  const reinv = Math.min(Math.max(0, num(activity.hoursReinvested)), Math.max(0, manual - freed));
+  const human = Math.max(0, manual - freed - reinv);
+  const note = `Ore spostate dall'attività «${activity.name}» in migrazione, senza sommarle due volte.`;
+  const parts: WorkTask[] = [];
+  if (freed === 0 && reinv === 0) {
+    parts.push(taskFromPart(activity, "u", activity.name, manual, "umano", 0, 0, ""));
+  } else {
+    if (human > 0) parts.push(taskFromPart(activity, "u", `${activity.name} · parte umana`, human, "umano", 0, 0, note));
+    if (freed > 0) parts.push(taskFromPart(activity, "f", `${activity.name} · ore liberate`, freed, "automazione", 100, parts.length, note));
+    if (reinv > 0) parts.push(taskFromPart(activity, "r", `${activity.name} · ore potenziate`, reinv, "augmentation", 100, parts.length, note));
+  }
+  if (!parts.length) parts.push(taskFromPart(activity, "u", activity.name, manual, "umano", 0, 0, ""));
+  if (parts.length === 1) parts[0] = { ...parts[0], name: activity.name, notes: "" };
+  return parts;
+}
+
+/**
+ * v5 → v6: i micro-task escono dall'attività e diventano entità.
+ * Se i task ci sono già, non vengono rigenerati.
+ */
+function v5to6(raw: any): AppState {
+  const v5 = raw.version === 6 ? raw : v4to5(raw);
+  const activities: Activity[] = (v5.activities ?? []).map((a: Activity) => ({ ...a, subtasks: a.subtasks ?? [] }));
+  const existing = Array.isArray(v5.tasks) ? v5.tasks.map((t: any, i: number) => normalizeTask(t, i)).filter((t: WorkTask) => t.id && t.activityId) : [];
+  const tasks = existing.length ? existing : activities.flatMap(tasksFromActivity);
+  return {
+    ...v5,
+    version: 6,
+    tasks,
+    activities: activities.map((a) => ({ ...a, subtasks: [] })),
+  };
+}
+
+/** Porta qualunque versione salvata (v2 ... v6) al formato v6. Ritorna null se non riconosciuta. */
 export function migrate(raw: any): AppState | null {
   if (!raw || typeof raw !== "object") return null;
-  if (raw.version === 5 || raw.version === 4) return v4to5(raw);
-  if (raw.version === 3) return v4to5(v3to4(raw));
-  if (raw.version === 2) return v4to5(v3to4(v2to3(raw)));
+  if (raw.version === 6 || raw.version === 5 || raw.version === 4) return v5to6(raw);
+  if (raw.version === 3) return v5to6(v3to4(raw));
+  if (raw.version === 2) return v5to6(v3to4(v2to3(raw)));
   return null;
 }

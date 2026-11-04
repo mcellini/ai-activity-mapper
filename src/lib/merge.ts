@@ -40,10 +40,11 @@ export function contentKey(state: AppState): string {
 export function mergeThreeWay(base: AppState, server: AppState, client: AppState): MergeResult {
   const conflicts: string[] = [];
   const state: AppState = {
-    version: 5,
+    version: 6,
     example: mergeFlag(base.example, server.example, client.example, conflicts),
     updatedAt: server.updatedAt,
     activities: [],
+    tasks: [],
     workflows: [],
     blockers: [],
     microTools: [],
@@ -53,6 +54,7 @@ export function mergeThreeWay(base: AppState, server: AppState, client: AppState
     settings: mergeSettings(base.settings, server.settings, client.settings, conflicts),
   };
   state.activities = mergeById("Attività", base.activities, server.activities, client.activities, conflicts);
+  state.tasks = mergeById("Task", base.tasks ?? [], server.tasks ?? [], client.tasks ?? [], conflicts);
   state.blockers = mergeById("Blocker", base.blockers, server.blockers, client.blockers, conflicts);
   state.microTools = mergeById("Micro-tool", base.microTools, server.microTools, client.microTools, conflicts);
   state.people = mergeById("Persona", base.people, server.people, client.people, conflicts);

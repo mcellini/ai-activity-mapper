@@ -64,10 +64,10 @@ export function runChecks(s: AppState): Issue[] {
         text: `${a.name}: ${a.hoursFreed} h liberate basate solo su stima. Da misurare.`,
       });
     }
-    if (subtaskMismatch(a)) {
+    if (subtaskMismatch({ ...a, subtasks: (s.tasks ?? []).filter((t) => t.activityId === a.id).map((t) => ({ id: t.id, name: t.name, hours: t.hours, treatment: t.treatment, pctSaved: t.pctSaved })) })) {
       out.push({
         id: `sub-${a.id}`, level: "media", tab: "Teams",
-        text: `${a.name}: i micro-task non tornano con le ore dichiarate sull'attività. Apri il dettaglio e usa «Applica».`,
+        text: `${a.name}: i task non tornano con le ore dichiarate sull'attività.`,
       });
     }
     if (a.runsPerMonth > 0 && a.hoursPerRun > 0 && Math.abs(a.runsPerMonth * a.hoursPerRun - a.hoursManual) > Math.max(1, a.hoursManual * 0.1)) {

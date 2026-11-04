@@ -1,7 +1,7 @@
 import type {
   Activity, AppState, Area, Blocker, BlockerKind, Cadence, Client, ClientStatus, Complexity,
   Confidence, Destination, MicroTool, Need, Person, RiskLevel, Seniority, Severity, SubTask,
-  ToolKind, ToolStatus, Treatment, WorkType, Workflow,
+  ToolKind, ToolStatus, Treatment, WorkTask, WorkType, Workflow,
 } from "@/types";
 
 const TEAMS = ["seo", "content", "pr", "social", "design"];
@@ -50,12 +50,15 @@ export function validateState(raw: unknown): string[] {
     if (errors.length < MAX) errors.push(m);
   };
   if (!isRecord(raw)) return ["Lo stato non è un oggetto"];
-  if (raw.version !== 5) push("Versione non supportata (attesa la 5)");
+  if (raw.version !== 6) push("Versione non supportata (attesa la 6)");
   if (raw.example !== undefined && typeof raw.example !== "boolean") push("Il campo example non è un booleano");
   if (!str(raw.updatedAt)) push("Manca updatedAt");
 
   if (!Array.isArray(raw.activities)) push("activities non è una lista");
   else checkIds(raw.activities, "attività", push, (a, label) => checkActivity(a, label, push));
+
+  if (!Array.isArray(raw.tasks)) push("tasks non è una lista");
+  else checkIds(raw.tasks, "task", push, (t, label) => checkTask(t, label, push));
 
   if (!Array.isArray(raw.workflows)) push("workflows non è una lista");
   else checkIds(raw.workflows, "workflow", push, (w, label) => checkWorkflow(w, label, push));
@@ -132,6 +135,15 @@ function checkActivity(a: unknown, label: string, push: (m: string) => void) {
   if (!strList(x.dependsOn)) push(`${label}: dependsOn non è una lista`);
   if (!Array.isArray(x.subtasks)) push(`${label}: subtasks non è una lista`);
   else x.subtasks.forEach((s, i) => checkSub(s, `${label} micro-task #${i + 1}`, push));
+}
+
+function checkTask(t: unknown, label: string, push: (m: string) => void) {
+  const x = t as Partial<WorkTask>;
+  if (!str(x.activityId) || !x.activityId.trim()) push(`${label}: attività mancante`);
+  if (!str(x.name) || !str(x.notes) || !str(x.tools) || !str(x.owner)) push(`${label}: campi di testo mancanti`);
+  if (!oneOf(x.teamId, TEAMS)) push(`${label}: team non valido`);
+  if (!oneOf(x.treatment, TREAT)) push(`${label}: trattamento non valido`);
+  if (!num(x.hours) || !num(x.pctSaved, 0, 100) || !num(x.runsPerMonth) || !num(x.order)) push(`${label}: numeri non validi`);
 }
 
 function checkSub(s: unknown, label: string, push: (m: string) => void) {

@@ -27,9 +27,8 @@ jobs:
       - run: npm run build
         env:
           # Settings > Secrets and variables > Actions > Variables
-          # VITE_SHEETS_URL è l'URL /exec. VITE_GOOGLE_CLIENT_ID è il client ID OAuth pubblico, non un segreto.
+          # URL /exec dell'app web. La password non va qui: sta solo nello script.
           VITE_SHEETS_URL: ${{ vars.VITE_SHEETS_URL }}
-          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

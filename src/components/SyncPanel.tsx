@@ -1,16 +1,15 @@
 import { useState } from "react";
 import type { SyncStatus } from "@/types";
-import type { GoogleSession } from "@/lib/googleAuth";
 import Dialog from "./Dialog";
-import GoogleSignInButton from "./GoogleSignInButton";
 
 interface Props {
   url: string;
   status: SyncStatus;
   error: string;
-  email: string;
+  password: string;
+  remember: boolean;
   canUploadExample: boolean;
-  onCredential: (session: GoogleSession) => void;
+  onPassword: (password: string, remember: boolean) => void;
   onSignOut: () => void;
   onSaveUrl: (url: string) => void;
   onPull: () => void;
@@ -20,7 +19,7 @@ interface Props {
 
 const STATUS_LABEL: Record<SyncStatus, string> = {
   off: "Solo locale",
-  auth: "Accesso richiesto",
+  auth: "Password richiesta",
   loading: "Caricamento…",
   idle: "Collegato",
   saving: "Salvataggio…",
@@ -28,16 +27,42 @@ const STATUS_LABEL: Record<SyncStatus, string> = {
   error: "Errore",
 };
 
+export function PasswordFields({
+  password, remember, onSubmit,
+}: {
+  password: string;
+  remember: boolean;
+  onSubmit: (password: string, remember: boolean) => void;
+}) {
+  const [draft, setDraft] = useState(password);
+  const [keep, setKeep] = useState(remember);
+  return (
+    <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); onSubmit(draft, keep); }}>
+      <label className="block text-sm" htmlFor="gate-password">
+        Password condivisa
+        <input id="gate-password" type="password" autoComplete="current-password" className="input mt-1" value={draft} onChange={(e) => setDraft(e.target.value)} />
+      </label>
+      <label className="flex items-center gap-2 text-sm" htmlFor="gate-remember">
+        <input id="gate-remember" type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
+        Ricordami su questo dispositivo
+      </label>
+      <button type="submit" className="btn-primary" disabled={!draft}>Entra</button>
+    </form>
+  );
+}
+
 export default function SyncPanel({
-  url, status, error, email, canUploadExample, onCredential, onSignOut, onSaveUrl, onPull, onUploadExample, onClose,
+  url, status, error, password, remember, canUploadExample, onPassword, onSignOut, onSaveUrl, onPull, onUploadExample, onClose,
 }: Props) {
   const [value, setValue] = useState(url);
+  const [draft, setDraft] = useState(password);
+  const [keep, setKeep] = useState(remember);
   return (
     <Dialog title="Sincronizzazione Google Sheets" onClose={onClose}>
       <ol className="list-decimal space-y-1 pl-5 text-sm text-slate-600">
-        <li>Crea il client OAuth e le proprietà dello script come descritto nel README.</li>
-        <li>Distribuisci l'app web: esegui come te, accesso «Chiunque». L'accesso vero è l'elenco email.</li>
-        <li>Incolla l'URL che termina con <code>/exec</code> e accedi con Google.</li>
+        <li>Nello script imposta la proprietà <code>APP_PASSWORD</code>.</li>
+        <li>Distribuisci l'app web: esegui come te, accesso «Chiunque».</li>
+        <li>Incolla l'URL che termina con <code>/exec</code> e la password condivisa.</li>
       </ol>
       <label className="block text-sm" htmlFor="sheets-url">
         URL dell'app web
@@ -49,25 +74,36 @@ export default function SyncPanel({
           onChange={(e) => setValue(e.target.value)}
         />
       </label>
-      <div className="text-sm text-slate-600">
+      <label className="block text-sm" htmlFor="sheets-password">
+        Password condivisa
+        <input
+          id="sheets-password"
+          type="password"
+          autoComplete="current-password"
+          className="input mt-1"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+      </label>
+      <label className="flex items-center gap-2 text-sm" htmlFor="sheets-remember">
+        <input id="sheets-remember" type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
+        Ricordami su questo dispositivo
+      </label>
+      <div className="text-sm text-slate-600" role="status">
         Stato: {STATUS_LABEL[status]}
-        {email && <span> · {email}</span>}
-        {error && <span className="text-rose-600"> · {error}</span>}
+        {error && <span className="text-rose-700"> · {error}</span>}
       </div>
-      {email ? (
-        <button type="button" className="btn" onClick={onSignOut}>Esci da Google</button>
-      ) : (
-        <GoogleSignInButton onCredential={onCredential} />
-      )}
       <p className="text-xs text-slate-500">
-        Senza URL il lavoro resta in questo browser. Un foglio vuoto non riceve i dati di esempio: si parte da zero, e l'esempio si carica solo dal pulsante qui sotto.
+        Senza URL il lavoro resta in questo browser. Un foglio vuoto non riceve i dati di esempio.
+        Chi ha la password e l'indirizzo può leggere e scrivere.
       </p>
       <div className="flex flex-wrap justify-end gap-2">
+        {password && <button type="button" className="btn" onClick={onSignOut}>Esci</button>}
         {canUploadExample && (
           <button type="button" className="btn" onClick={onUploadExample}>Carica i dati di esempio</button>
         )}
-        <button type="button" className="btn" onClick={onPull} disabled={!value.trim() || !email}>Ricarica dal foglio</button>
-        <button type="button" className="btn-primary" onClick={() => onSaveUrl(value.trim())}>Salva URL</button>
+        <button type="button" className="btn" onClick={onPull} disabled={!value.trim() || !draft}>Ricarica dal foglio</button>
+        <button type="button" className="btn-primary" onClick={() => { onPassword(draft, keep); onSaveUrl(value.trim()); }}>Salva</button>
       </div>
     </Dialog>
   );

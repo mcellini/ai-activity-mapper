@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import type { Activity, AppState, ServerSnapshot, Snapshot, SyncStatus } from "@/types";
+import type { Activity, AppState, ServerSnapshot, Snapshot, SyncStatus, WorkTask } from "@/types";
 import { fmt, uid } from "@/lib/calc";
 import { metrics } from "@/lib/metrics";
 import { contentKey } from "@/lib/merge";
@@ -10,9 +10,8 @@ import {
   acceptState, exportCsv, exportJson, listServerSnapshots, loadLocal, loadSheetsUrl, loadSnapshots,
   pullFromSheets, pushToSheets, restoreServerSnapshot, saveLocal, saveSheetsUrl, saveSnapshots, snapshotOnSheets,
 } from "@/lib/storage";
-import {
-  loadSession, signOutGoogle, storeSession, tokenUsable, type GoogleSession,
-} from "@/lib/googleAuth";
+import { clearPassword, loadPassword, savePassword } from "@/lib/password";
+import { newTask, syncHours } from "@/lib/subtasks";
 import ExecutiveView from "./ExecutiveView";
 import SummaryView from "./SummaryView";
 import TeamsView from "./TeamsView";
@@ -23,13 +22,12 @@ import LinksView from "./LinksView";
 import MeasureView from "./MeasureView";
 import StaffingView from "./StaffingView";
 import HistoryView from "./HistoryView";
-import SyncPanel from "./SyncPanel";
+import SyncPanel, { PasswordFields } from "./SyncPanel";
 import QualityView from "./QualityView";
 import TableView from "./TableView";
 import ToBeView from "./ToBeView";
 import AgentsView from "./AgentsView";
 import ImportCsvModal from "./ImportCsvModal";
-import GoogleSignInButton from "./GoogleSignInButton";
 import ConfirmButton from "./ConfirmButton";
 import { runChecks } from "@/lib/quality";
 
@@ -41,7 +39,7 @@ type Tab = (typeof TABS)[number];
 
 const STATUS_LABEL: Record<SyncStatus, string> = {
   off: "Solo locale",
-  auth: "Accesso richiesto",
+  auth: "Password richiesta",
   loading: "Caricamento…",
   idle: "Sheets collegato",
   saving: "Salvataggio…",
@@ -59,7 +57,9 @@ export default function AIActivityMapper() {
   const [serverSnaps, setServerSnaps] = useState<ServerSnapshot[]>([]);
   const [tab, setTab] = useState<Tab>("Executive");
   const [sheetsUrl, setSheetsUrl] = useState(initialUrl);
-  const [session, setSession] = useState<GoogleSession | null>(loadSession);
+  const storedPassword = loadPassword();
+  const [password, setPassword] = useState(storedPassword.password);
+  const [rememberPassword, setRememberPassword] = useState(storedPassword.remember);
   const [status, setStatus] = useState<SyncStatus>(initialUrl ? "auth" : "off");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -75,7 +75,7 @@ export default function AIActivityMapper() {
   const stateRef = useRef(state);
   const snapsRef = useRef(snapshots);
   const revealedRef = useRef(revealed);
-  const sessionRef = useRef(session);
+  const passwordRef = useRef(password);
   const baseRevision = useRef(0);
   const baseState = useRef<AppState | null>(initialUrl ? null : clone(loadLocal()));
   const conflictRev = useRef(0);
@@ -83,7 +83,7 @@ export default function AIActivityMapper() {
   stateRef.current = state;
   snapsRef.current = snapshots;
   revealedRef.current = revealed;
-  sessionRef.current = session;
+  passwordRef.current = password;
 
   const remember = (label: string) => {
     const snap: Snapshot = { id: uid(), label, date: new Date().toISOString(), state: clone(stateRef.current) };
@@ -105,17 +105,21 @@ export default function AIActivityMapper() {
     setRevealed(true);
   };
 
-  const onCredential = useCallback((next: GoogleSession) => {
-    storeSession(next);
-    setSession(next);
+  const onPassword = useCallback((next: string, remember: boolean) => {
+    setPassword(next);
+    setRememberPassword(remember);
+    if (next) savePassword(next, remember);
+    else clearPassword();
     setError("");
   }, []);
 
   const signOut = () => {
-    signOutGoogle();
-    setSession(null);
+    clearPassword();
+    setPassword("");
+    setRememberPassword(false);
     if (sheetsUrl) {
       setSyncReady(false);
+      setRevealed(false);
       setStatus("auth");
     }
   };
@@ -131,7 +135,7 @@ export default function AIActivityMapper() {
       if (!baseState.current) baseState.current = clone(stateRef.current);
       return;
     }
-    if (!tokenUsable(session)) {
+    if (!Boolean(password)) {
       setStatus("auth");
       setSyncReady(false);
       return;
@@ -141,7 +145,7 @@ export default function AIActivityMapper() {
     setSyncReady(false);
     (async () => {
       try {
-        const res = await pullFromSheets(sheetsUrl, session.token);
+        const res = await pullFromSheets(sheetsUrl, password);
         if (cancelled) return;
         if (!res.ok) throw new Error(res.error || "Errore");
         if (res.empty) applyRemote(emptyState(), 0, "Prima del collegamento al foglio vuoto");
@@ -162,10 +166,10 @@ export default function AIActivityMapper() {
     return () => { cancelled = true; };
     // applyRemote chiude sulle ref, non sullo stato
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sheetsUrl, session, pullNonce]);
+  }, [sheetsUrl, password, pullNonce]);
 
   useEffect(() => {
-    if (!sheetsUrl || !syncReady || conflict || !tokenUsable(session)) return;
+    if (!sheetsUrl || !syncReady || conflict || !Boolean(password)) return;
     if (!baseState.current) return;
     if (contentKey(state) === contentKey(baseState.current)) return;
     const problems = validateState(state);
@@ -176,7 +180,7 @@ export default function AIActivityMapper() {
     }
     const gen = ++editGen.current;
     const sent = state;
-    const token = session.token;
+    const token = password;
     const expected = baseRevision.current;
     const base = clone(baseState.current);
     setStatus("saving");
@@ -215,27 +219,58 @@ export default function AIActivityMapper() {
       }
     }, 2000);
     return () => window.clearTimeout(timer);
-  }, [state, sheetsUrl, syncReady, conflict, session]);
+  }, [state, sheetsUrl, syncReady, conflict, password]);
 
   useEffect(() => {
-    if (tab !== "Storico" || !sheetsUrl || !tokenUsable(session) || !syncReady) return;
+    if (tab !== "Storico" || !sheetsUrl || !Boolean(password) || !syncReady) return;
     let cancelled = false;
-    listServerSnapshots(sheetsUrl, session.token).then((res) => {
+    listServerSnapshots(sheetsUrl, password).then((res) => {
       if (!cancelled && res.ok && res.snapshots) setServerSnaps(res.snapshots);
     }).catch(() => { /* la sezione Drive resta vuota */ });
     return () => { cancelled = true; };
-  }, [tab, sheetsUrl, session, syncReady, remoteRevision]);
+  }, [tab, sheetsUrl, password, syncReady, remoteRevision]);
 
   const commit = (patch: Partial<AppState>) =>
     setState((s) => ({ ...s, ...patch, updatedAt: new Date().toISOString() }));
 
+  const setActivities = (activities: Activity[]) => {
+    const ids = new Set(activities.map((a) => a.id));
+    commit({
+      activities: activities.map((a) => ({ ...a, subtasks: [] })),
+      tasks: stateRef.current.tasks.filter((t) => ids.has(t.activityId)),
+    });
+  };
+
+  const setTasks = (tasks: WorkTask[]) => {
+    commit({
+      tasks,
+      activities: stateRef.current.activities.map((a) => syncHours(a, tasks)),
+    });
+  };
+
+  const addActivity = (activity: Activity) => {
+    setState((current) => {
+      const created = { ...activity, subtasks: [] as Activity["subtasks"] };
+      const task = newTask(created, 0);
+      task.name = created.name;
+      task.hours = created.hoursManual;
+      const tasks = [...current.tasks, task];
+      return {
+        ...current,
+        tasks,
+        activities: [...current.activities, syncHours(created, tasks)],
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  };
+
   const forcePush = async (next: AppState) => {
-    if (!sheetsUrl || !tokenUsable(sessionRef.current)) {
+    if (!sheetsUrl || !Boolean(passwordRef.current)) {
       setState(next);
       return;
     }
     setStatus("saving");
-    const res = await pushToSheets(sheetsUrl, sessionRef.current.token, {
+    const res = await pushToSheets(sheetsUrl, passwordRef.current, {
       expectedRevision: baseRevision.current,
       baseState: baseState.current,
       state: next,
@@ -294,11 +329,11 @@ export default function AIActivityMapper() {
 
   const saveSnap = async (label: string) => {
     remember(label);
-    if (!sheetsUrl || !syncReady || !tokenUsable(sessionRef.current) || conflict) return;
+    if (!sheetsUrl || !syncReady || !Boolean(passwordRef.current) || conflict) return;
     try {
       let current = stateRef.current;
       if (baseState.current && contentKey(current) !== contentKey(baseState.current)) {
-        const pushed = await pushToSheets(sheetsUrl, sessionRef.current.token, {
+        const pushed = await pushToSheets(sheetsUrl, passwordRef.current, {
           expectedRevision: baseRevision.current,
           baseState: baseState.current,
           state: current,
@@ -322,9 +357,9 @@ export default function AIActivityMapper() {
         if (contentKey(saved) !== contentKey(current)) setState(saved);
         current = saved;
       }
-      const snap = await snapshotOnSheets(sheetsUrl, sessionRef.current.token, label);
+      const snap = await snapshotOnSheets(sheetsUrl, passwordRef.current, label);
       if (!snap.ok) throw new Error(snap.error || "Errore");
-      const listed = await listServerSnapshots(sheetsUrl, sessionRef.current.token);
+      const listed = await listServerSnapshots(sheetsUrl, passwordRef.current);
       if (listed.ok && listed.snapshots) setServerSnaps(listed.snapshots);
       setNotice("Istantanea salvata anche sul Drive.");
       setStatus("saved");
@@ -341,10 +376,10 @@ export default function AIActivityMapper() {
   };
 
   const restoreServer = async (id: string) => {
-    if (!sheetsUrl || !tokenUsable(sessionRef.current)) return;
+    if (!sheetsUrl || !Boolean(passwordRef.current)) return;
     remember("Prima del ripristino dallo storico");
     try {
-      const res = await restoreServerSnapshot(sheetsUrl, sessionRef.current.token, id, baseRevision.current);
+      const res = await restoreServerSnapshot(sheetsUrl, passwordRef.current, id, baseRevision.current);
       if (res.conflict && res.state) {
         const remote = acceptState(res.state);
         if (!remote) throw new Error("Il foglio contiene dati non validi");
@@ -424,9 +459,10 @@ export default function AIActivityMapper() {
         </div>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
           <span role="status" className={`rounded-full px-2.5 py-1 text-xs font-medium ${status === "error" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
-            {STATUS_LABEL[status]}{session?.email ? ` · ${session.email}` : ""}
+            {STATUS_LABEL[status]}
           </span>
           <button type="button" className="btn" onClick={() => setShowSync(true)}>Sheets</button>
+          {sheetsUrl && password && <button type="button" className="btn" onClick={signOut}>Esci</button>}
           <button type="button" className="btn" onClick={() => setShowCsv(true)} disabled={blocked}>Import CSV</button>
           <button type="button" className="btn" onClick={() => exportCsv(state)} disabled={blocked}>CSV</button>
           <button type="button" className="btn" onClick={() => exportJson(state)} disabled={blocked}>Export JSON</button>
@@ -439,19 +475,16 @@ export default function AIActivityMapper() {
         <section className="card space-y-3 p-6" aria-busy={status === "loading"}>
           <h2 className="text-lg font-semibold">Collegamento al foglio</h2>
           {status === "loading" && <p className="text-sm text-slate-600">Caricamento del foglio. La modifica è sospesa finché non arriva la risposta.</p>}
-          {status === "auth" && (
+          {(status === "auth" || status === "error") && (
             <>
-              <p className="text-sm text-slate-600">Accedi con Google per leggere il foglio. I dati di esempio non vengono inviati.</p>
-              <GoogleSignInButton onCredential={onCredential} />
-            </>
-          )}
-          {status === "error" && (
-            <>
-              <p className="text-sm text-rose-700">{error || "Impossibile leggere il foglio."}</p>
-              <div className="flex flex-wrap gap-2">
-                <button type="button" className="btn-primary" onClick={() => setPullNonce((n) => n + 1)}>Riprova</button>
-                <button type="button" className="btn" onClick={workLocal}>Continua solo in questo browser</button>
-              </div>
+              <p className="text-sm text-slate-600">Per leggere il foglio serve la password condivisa. I dati di esempio non vengono inviati.</p>
+              {error && <p className="text-sm text-rose-700" role="alert">{error}</p>}
+              <PasswordFields
+                password={password}
+                remember={rememberPassword}
+                onSubmit={(next, keep) => { onPassword(next, keep); setPullNonce((n) => n + 1); }}
+              />
+              <button type="button" className="btn" onClick={workLocal}>Continua solo in questo browser</button>
             </>
           )}
         </section>
@@ -471,8 +504,12 @@ export default function AIActivityMapper() {
       {revealed && blocked && (
         <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950" role="status">
           <p className="font-semibold">Modifica sospesa</p>
-          <p className="mt-1">{status === "auth" ? "La sessione Google è scaduta o manca. Accedi di nuovo per continuare sul foglio." : (error || "Attendi il foglio.")}</p>
-          {status === "auth" && <div className="mt-2"><GoogleSignInButton onCredential={onCredential} /></div>}
+          <p className="mt-1">{status === "auth" ? "Manca la password. Inseriscila per continuare sul foglio." : (error || "Attendi il foglio.")}</p>
+          {status === "auth" && (
+            <div className="mt-2">
+              <PasswordFields password={password} remember={rememberPassword} onSubmit={(next, keep) => { onPassword(next, keep); setPullNonce((n) => n + 1); }} />
+            </div>
+          )}
           {status === "error" && (
             <div className="mt-2 flex flex-wrap gap-2">
               <button type="button" className="btn-primary" onClick={() => setPullNonce((n) => n + 1)}>Riprova</button>
@@ -547,9 +584,12 @@ export default function AIActivityMapper() {
             {tab === "Teams" && (
               <TeamsView
                 activities={state.activities}
+                tasks={state.tasks}
                 blockers={state.blockers}
                 microTools={state.microTools}
-                onChange={(activities) => commit({ activities })}
+                onChange={setActivities}
+                onTasks={setTasks}
+                onAdd={addActivity}
                 onChangeBlockers={(blockers) => commit({ blockers })}
                 onChangeTools={(microTools) => commit({ microTools })}
               />
@@ -580,14 +620,16 @@ export default function AIActivityMapper() {
             )}
             {tab === "AS-IS / TO-BE" && <ToBeView state={state} onGo={(t) => setTab(t as Tab)} />}
             {tab === "Agenti" && <AgentsView state={state} onGo={(t) => setTab(t as Tab)} />}
-            {tab === "Tabella" && <TableView activities={state.activities} onChange={(activities) => commit({ activities })} />}
+            {tab === "Tabella" && (
+              <TableView activities={state.activities} tasks={state.tasks} onChange={setActivities} onTasks={setTasks} />
+            )}
             {tab === "Controlli" && <QualityView issues={issues} onGo={(t) => setTab(t as Tab)} />}
             {tab === "Storico" && (
               <HistoryView
                 state={state}
                 snapshots={snapshots}
                 serverSnapshots={serverSnaps}
-                serverReady={Boolean(sheetsUrl) && syncReady && tokenUsable(session)}
+                serverReady={Boolean(sheetsUrl) && syncReady && Boolean(password)}
                 onSave={saveSnap}
                 onRestore={(s) => { remember("Prima del ripristino locale"); setState({ ...clone(s.state), updatedAt: new Date().toISOString() }); setNotice(""); }}
                 onDelete={deleteSnap}
@@ -605,9 +647,10 @@ export default function AIActivityMapper() {
           url={sheetsUrl}
           status={status}
           error={error}
-          email={session?.email ?? ""}
+          password={password}
+          remember={rememberPassword}
           canUploadExample={canUploadExample}
-          onCredential={onCredential}
+          onPassword={onPassword}
           onSignOut={signOut}
           onSaveUrl={(u) => {
             setSheetsUrl(u);

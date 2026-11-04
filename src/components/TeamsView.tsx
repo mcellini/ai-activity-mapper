@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type {
-  Activity, Blocker, Complexity, Confidence, Destination, MicroTool, RiskLevel, TeamId, WorkType,
+  Activity, Blocker, Complexity, Confidence, Destination, MicroTool, RiskLevel, TeamId, WorkTask, WorkType,
 } from "@/types";
 import {
   CONFIDENCE, COMPLEXITY_LABEL, DESTINATIONS, RISK_LABEL, TEAMS, WORK_TYPES, confLabel, fmt,
@@ -9,12 +9,16 @@ import {
 import ConfirmButton from "./ConfirmButton";
 import Wizard from "./Wizard";
 import ActivityDetail from "./ActivityDetail";
+import TaskList from "./TaskList";
 
 interface Props {
   activities: Activity[];
+  tasks: WorkTask[];
   blockers: Blocker[];
   microTools: MicroTool[];
   onChange: (next: Activity[]) => void;
+  onTasks: (next: WorkTask[]) => void;
+  onAdd: (activity: Activity) => void;
   onChangeBlockers: (next: Blocker[]) => void;
   onChangeTools: (next: MicroTool[]) => void;
 }
@@ -55,7 +59,7 @@ const RISK_STYLE: Record<RiskLevel, string> = {
 };
 
 export default function TeamsView({
-  activities, blockers, microTools, onChange, onChangeBlockers, onChangeTools,
+  activities, tasks, blockers, microTools, onChange, onTasks, onAdd, onChangeBlockers, onChangeTools,
 }: Props) {
   const [team, setTeam] = useState<TeamId | "all">("all");
   const [editing, setEditing] = useState<string | null>(null);
@@ -87,6 +91,9 @@ export default function TeamsView({
     onChangeBlockers(blockers.map((b) => ({ ...b, activityIds: b.activityIds.filter((x) => x !== id) })));
     onChangeTools(microTools.map((t) => ({ ...t, activityIds: t.activityIds.filter((x) => x !== id) })));
   };
+
+  const replaceTasks = (activityId: string, mine: WorkTask[]) =>
+    onTasks([...tasks.filter((t) => t.activityId !== activityId), ...mine]);
 
   return (
     <div className="space-y-4">
@@ -191,6 +198,14 @@ export default function TeamsView({
               {a.humanControl && (
                 <div className="mt-2 text-[11px] text-slate-500">Controllo umano: {a.humanControl}</div>
               )}
+
+              <div className="mt-3 border-t border-slate-100 pt-3">
+                <TaskList
+                  activity={a}
+                  tasks={tasks.filter((t) => t.activityId === a.id)}
+                  onChange={(mine) => replaceTasks(a.id, mine)}
+                />
+              </div>
 
               {open && (
                 <div className="mt-4 grid grid-cols-2 gap-3 border-t border-slate-100 pt-4">
@@ -312,7 +327,7 @@ export default function TeamsView({
           defaultTeam={team === "all" ? "seo" : team}
           onClose={() => setWizard(false)}
           onCreate={(a) => {
-            onChange([...activities, a]);
+            onAdd(a);
             setWizard(false);
             setEditing(a.id);
           }}

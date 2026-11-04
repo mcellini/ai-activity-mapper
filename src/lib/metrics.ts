@@ -7,7 +7,7 @@ export function metrics(s: AppState) {
   const a = all.filter((x) => x.area !== "rnd");
   const rnd = sum(all.filter((x) => x.area === "rnd").map((x) => x.hoursManual));
   const gare = sum(all.filter((x) => x.area === "gare").map((x) => x.hoursManual));
-  const newHours = sum(all.map((x) => sum(x.subtasks.filter((t) => t.treatment === "nuovo").map((t) => t.hours))));
+  const newHours = sum((s.tasks ?? []).filter((t) => t.treatment === "nuovo").map((t) => t.hours));
   const manual = sum(a.map((x) => x.hoursManual));
   const freed = sum(a.map((x) => x.hoursFreed));
   const reinv = sum(a.map((x) => x.hoursReinvested));

@@ -1,4 +1,5 @@
 import type { Activity, SubTask, AppState, Client, ClientStatus, Person, Seniority, TeamId } from "@/types";
+import { migrate } from "@/lib/migrate";
 
 type Opt = "tools" | "dependencies" | "notes" | "confidence" | "riskLevel" | "humanControl" | "dependsOn" | "area" | "runsPerMonth" | "hoursPerRun" | "subtasks";
 type A = Omit<Activity, Opt> & Partial<Pick<Activity, Opt>>;
@@ -73,8 +74,8 @@ const people: Person[] = [
   person("p12", "Design 2", "design", "mid", 40, 30),
 ];
 
-export const SEED: AppState = {
-  version: 5,
+const SEED_DRAFT = {
+  version: 5 as const,
   example: true,
   updatedAt: new Date(0).toISOString(),
   activities,
@@ -119,6 +120,9 @@ export const SEED: AppState = {
   ],
 };
 
+/** Dataset di esempio già portato alla versione 6, con un task per ogni micro-task. */
+export const SEED: AppState = migrate(SEED_DRAFT)!;
+
 /** Copia del dataset di esempio, con un updatedAt nuovo. Non muta SEED. */
 export function sampleState(): AppState {
   const copy = structuredClone(SEED);
@@ -130,10 +134,11 @@ export function sampleState(): AppState {
 /** Stato vuoto, da usare quando il foglio non ha ancora dati. */
 export function emptyState(): AppState {
   return {
-    version: 5,
+    version: 6,
     example: false,
     updatedAt: new Date().toISOString(),
     activities: [],
+    tasks: [],
     workflows: [],
     blockers: [],
     microTools: [],

@@ -98,7 +98,7 @@ export function saveSheetsUrl(url: string) {
 
 /**
  * Tutte le chiamate sono POST con Content-Type text/plain: niente preflight CORS,
- * e il token resta nel corpo, non nell'URL.
+ * e la password resta nel corpo, non nell'URL.
  */
 export async function sheetsCall(url: string, body: Record<string, unknown>): Promise<SheetsResponse> {
   let res: Response;
@@ -120,30 +120,30 @@ export async function sheetsCall(url: string, body: Record<string, unknown>): Pr
   }
 }
 
-export function pullFromSheets(url: string, token: string) {
-  return sheetsCall(url, { action: "pull", token });
+export function pullFromSheets(url: string, password: string) {
+  return sheetsCall(url, { action: "pull", password });
 }
 
 export function pushToSheets(
   url: string,
-  token: string,
+  password: string,
   payload: { expectedRevision: number; baseState: AppState | null; state: AppState; force?: boolean },
 ) {
-  return sheetsCall(url, { action: "push", token, ...payload });
+  return sheetsCall(url, { action: "push", password, ...payload });
 }
 
-export function snapshotOnSheets(url: string, token: string, label: string) {
-  return sheetsCall(url, { action: "snapshot", token, label });
+export function snapshotOnSheets(url: string, password: string, label: string) {
+  return sheetsCall(url, { action: "snapshot", password, label });
 }
 
-export function listServerSnapshots(url: string, token: string) {
-  return sheetsCall(url, { action: "listSnapshots", token });
+export function listServerSnapshots(url: string, password: string) {
+  return sheetsCall(url, { action: "listSnapshots", password });
 }
 
 export function restoreServerSnapshot(
-  url: string, token: string, fileId: string, expectedRevision: number, force = false,
+  url: string, password: string, fileId: string, expectedRevision: number, force = false,
 ) {
-  return sheetsCall(url, { action: "restore", token, fileId, expectedRevision, force });
+  return sheetsCall(url, { action: "restore", password, fileId, expectedRevision, force });
 }
 
 export { emptyState };
@@ -157,7 +157,7 @@ export function exportCsv(state: AppState) {
   const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
   const rows = state.activities.map((a) =>
     [
-      a.teamId, a.name, areaLabel(a.area), frequencyLabel(a.runsPerMonth), a.hoursPerRun, a.subtasks.map((x) => `${x.name} (${x.hours}h, ${x.treatment})`).join(" | "), workTypeLabel(a.workType), a.hoursManual, a.hoursFreed, a.hoursReinvested,
+      a.teamId, a.name, areaLabel(a.area), frequencyLabel(a.runsPerMonth), a.hoursPerRun, (state.tasks ?? []).filter((x) => x.activityId === a.id).map((x) => `${x.name} (${x.hours}h, ${x.treatment})`).join(" | "), workTypeLabel(a.workType), a.hoursManual, a.hoursFreed, a.hoursReinvested,
       destLabel(a.destination), confLabel(a.confidence), a.riskLevel, a.humanControl,
       a.pctAutomatable, a.pctAugmentable, a.complexity, a.tools, a.dependencies, a.notes,
       state.blockers.filter((b) => b.activityIds.includes(a.id)).map((b) => b.name).join(" | "),

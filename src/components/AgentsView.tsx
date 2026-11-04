@@ -14,9 +14,12 @@ export default function AgentsView({ state, onGo }: { state: AppState; onGo: (ta
   const live = routines.filter((t) => isToolLive(t.status));
   const future = routines.filter((t) => !isToolLive(t.status));
   const withNew = routines.filter((t) => t.newTask.trim());
-  const newSub = state.activities.flatMap((a) =>
-    a.subtasks.filter((s) => s.treatment === "nuovo").map((s) => ({ a, s }))
-  );
+  const newSub = (state.tasks ?? [])
+    .filter((s) => s.treatment === "nuovo")
+    .flatMap((s) => {
+      const a = state.activities.find((x) => x.id === s.activityId);
+      return a ? [{ a, s }] : [];
+    });
   const newHours = sum(newSub.map((x) => x.s.hours));
   const potential = (ids: string[]) => sum(state.activities.filter((a) => a.area !== "rnd" && ids.includes(a.id)).map(uncaptured));
 

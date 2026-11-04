@@ -1,17 +1,20 @@
 import { Fragment, useState } from "react";
-import type { Activity, TeamId, WorkType } from "@/types";
+import type { Activity, TeamId, WorkTask, WorkType } from "@/types";
 import { TEAMS, WORK_TYPES, areaLabel, fmt, frequencyLabel, teamById } from "@/lib/calc";
 import ActivityDetail from "./ActivityDetail";
+import TaskList from "./TaskList";
 
 interface Props {
   activities: Activity[];
+  tasks: WorkTask[];
   onChange: (next: Activity[]) => void;
+  onTasks: (next: WorkTask[]) => void;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Number.isFinite(v) ? v : lo));
 
 /** Tabella di inserimento rapido: tutte le attività in una griglia modificabile */
-export default function TableView({ activities, onChange }: Props) {
+export default function TableView({ activities, tasks, onChange, onTasks }: Props) {
   const [open, setOpen] = useState<string | null>(null);
   const patch = (id: string, p: Partial<Activity>) =>
     onChange(activities.map((a) => (a.id === id ? { ...a, ...p } : a)));
@@ -81,12 +84,21 @@ export default function TableView({ activities, onChange }: Props) {
                 <td className="p-1.5 pr-2 text-right"><input aria-label={`Percentuale aumentabile di ${a.name}`} type="number" min={0} max={100} className={num} value={a.pctAugmentable} onChange={(e) => setAug(a, +e.target.value)} /></td>
                 <td className="p-1.5 pr-2">
                   <button className="btn !px-2 text-xs" aria-expanded={open === a.id} onClick={() => setOpen(open === a.id ? null : a.id)}>
-                    {open === a.id ? "Chiudi" : `Dettaglio${a.subtasks.length ? ` (${a.subtasks.length})` : ""}`}
+                    {open === a.id ? "Chiudi" : `Task (${tasks.filter((t) => t.activityId === a.id).length})`}
                   </button>
                 </td>
               </tr>
               {open === a.id && (
-                <tr><td colSpan={10} className="p-0"><ActivityDetail a={a} onChange={(next) => onChange(activities.map((x) => (x.id === a.id ? next : x)))} /></td></tr>
+                <tr><td colSpan={10} className="p-0">
+                  <ActivityDetail a={a} onChange={(next) => onChange(activities.map((x) => (x.id === a.id ? next : x)))} />
+                  <div className="border-t border-slate-100 p-3">
+                    <TaskList
+                      activity={a}
+                      tasks={tasks.filter((t) => t.activityId === a.id)}
+                      onChange={(mine) => onTasks([...tasks.filter((t) => t.activityId !== a.id), ...mine])}
+                    />
+                  </div>
+                </td></tr>
               )}
               </Fragment>
             ))}
